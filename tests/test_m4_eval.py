@@ -713,3 +713,73 @@ def test_long_session_case_exists_for_m2_measurement():
     case = long_session_case()
     assert case.category == "long-session"
     assert case.setup, "the case needs a large fixture to create pressure"
+
+
+# ===========================================================================
+# The suite must meet the contract's size and coverage requirements
+# ===========================================================================
+
+#: From the M4 contract §4: 15-25 cases, with a minimum per category.
+REQUIRED_CATEGORIES = {
+    "single-file": (3, 5),
+    "cross-file": (3, 5),
+    "test-failure": (2, 3),
+    "refactor": (2, 3),
+    "long-session": (2, 3),
+    "fault-recovery": (2, 3),
+    "permission": (1, 2),
+}
+
+
+def test_the_suite_has_the_required_number_of_cases():
+    """The contract specifies 15-25; the first version had 10.
+
+    The size is not arbitrary. M2 and M3 are accepted on these cases, so a
+    category with one case cannot distinguish a regression from a flake in that
+    category.
+    """
+    from arm.eval.cases import default_cases
+
+    cases = default_cases()
+    assert 15 <= len(cases) <= 25, (
+        f"the suite has {len(cases)} cases; the contract asks for 15-25"
+    )
+
+
+def test_every_required_category_is_within_its_range():
+    """Each category has a minimum, and the reason is which mechanism it measures."""
+    from collections import Counter
+
+    from arm.eval.cases import default_cases
+
+    counts = Counter(case.category for case in default_cases())
+    short = {
+        name: (counts.get(name, 0), bounds)
+        for name, bounds in REQUIRED_CATEGORIES.items()
+        if not bounds[0] <= counts.get(name, 0) <= bounds[1]
+    }
+    assert not short, f"categories outside their required range: {short}"
+
+
+def test_the_compaction_case_is_in_the_default_suite():
+    """It was a standalone function that only a test called.
+
+    So the case M2's acceptance depends on was absent from every actual run, and
+    the suite reported 10 cases where the contract asks for 15-25.
+    """
+    from arm.eval.cases import default_cases, long_session_case
+
+    ids = {case.id for case in default_cases()}
+    assert long_session_case().id in ids, (
+        "the compaction case is defined but not included in the suite"
+    )
+
+
+def test_the_two_mechanism_categories_are_present():
+    """M2 and M3 have quantitative acceptance criteria that cannot be measured
+    without these cases."""
+    from arm.eval.cases import default_cases
+
+    categories = {case.category for case in default_cases()}
+    assert "long-session" in categories, "M2's acceptance has no case to measure it"
+    assert "fault-recovery" in categories, "M3's acceptance has no case to measure it"
