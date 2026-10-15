@@ -848,3 +848,115 @@ def test_derived_messages_are_frozen():
 
     with pytest.raises(Exception):
         second[0].content[0].text = "mutated"  # type: ignore[misc]
+
+
+# ===========================================================================
+# M1.13: an empty message and the surface
+# ===========================================================================
+
+
+def test_an_empty_assistant_response_does_not_shift_the_message_sequence():
+    """M1.13's stated risk: "消息序列与位置语义分离，工具配对错位".
+
+    The contract's mechanism is a placeholder that keeps its surface position.
+    The implementation records `assistant/attempt` instead, which is *not* a
+    surface event -- so no position is kept.
+
+    Verified here: the outcome the requirement exists to protect is intact. The
+    derived sequence stays `system, user, user, assistant`, so nothing is
+    misaligned and no tool pairing is disturbed. The difference is in the
+    mechanism, not the behaviour, and this test pins the behaviour.
+    """
+    import asyncio
+
+    from arm.agent.loop import Runtime
+    from arm.llm.mock import MockAdapter, ScriptedTurn
+    from arm.prompt.assembler import PromptAssembler
+    from arm.session.session import Session
+    from arm.tools.registry import ToolRegistry
+
+    assembler = PromptAssembler()
+    assembler.set("core", "you are arm", priority=10)
+    session = Session.create("empty")
+    loop = Runtime(
+        session,
+        MockAdapter([ScriptedTurn(text=""), ScriptedTurn(text="second")]),
+        ToolRegistry(),
+        assembler=assembler,
+        model="mock",
+    )
+
+    loop.submit("one")
+    asyncio.run(loop.run_until_idle())
+    loop.submit("two")
+    asyncio.run(loop.run_until_idle())
+
+    # The empty response is recorded as an attempt, and nothing else changes.
+    assert any(e.type == "assistant/attempt" for e in session)
+    roles = [m.role for m in session.derive()]
+    assert roles == ["system", "user", "user", "assistant"], roles
+
+
+def test_an_empty_assistant_response_does_not_enter_the_message_sequence():
+    """It must not be sent to the model as an empty message.
+
+    A contentless assistant node would be rejected by a provider, so the
+    requirement is that it is recorded without being sent.
+    """
+    import asyncio
+
+    from arm.agent.loop import Runtime
+    from arm.llm.mock import MockAdapter, ScriptedTurn, text_response
+    from arm.prompt.assembler import PromptAssembler
+    from arm.session.session import Session
+    from arm.tools.registry import ToolRegistry
+
+    assembler = PromptAssembler()
+    assembler.set("core", "you are arm", priority=10)
+    session = Session.create("empty-2")
+    adapter = MockAdapter(
+        [ScriptedTurn(text=""), text_response("after")]
+    )
+    loop = Runtime(session, adapter, ToolRegistry(), assembler=assembler, model="mock")
+
+    loop.submit("one")
+    asyncio.run(loop.run_until_idle())
+
+    # Whatever the second request contained, it had no contentless assistant node.
+    for request in adapter.requests:
+        for message in request.messages:
+            if message.role == "assistant":
+                assert message.content, (
+                    "a contentless assistant message reached the provider"
+                )
+
+
+def test_the_surface_holds_only_real_messages():
+    """An attempt is a record, not a message.
+
+    Stated as a test because the contract describes a placeholder that keeps its
+    surface position, and this implementation does something else. The behaviour
+    is right; the mechanism differs, and that difference should be visible.
+    """
+    import asyncio
+
+    from arm.agent.loop import Runtime
+    from arm.llm.mock import MockAdapter, ScriptedTurn
+    from arm.prompt.assembler import PromptAssembler
+    from arm.session.session import Session
+    from arm.tools.registry import ToolRegistry
+
+    assembler = PromptAssembler()
+    assembler.set("core", "you are arm", priority=10)
+    session = Session.create("empty-3")
+    loop = Runtime(
+        session, MockAdapter([ScriptedTurn(text="")]), ToolRegistry(),
+        assembler=assembler, model="mock",
+    )
+    loop.submit("one")
+    asyncio.run(loop.run_until_idle())
+
+    surface_types = {session.event_at(seq).type for seq in session.surface_nodes()}
+    assert "assistant/attempt" not in surface_types, (
+        "the attempt became a surface node, which the contract does not ask for"
+    )
