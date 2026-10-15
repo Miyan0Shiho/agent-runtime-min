@@ -330,6 +330,44 @@ def build_runtime(
         workspace=os.getcwd(),
     )
 
+    # The Docker sandbox replaces the `bash` body rather than wrapping the
+    # pipeline. A wrapper would have to recognise the tool by name, and a name is
+    # something a caller can change; swapping the body means there is no path in
+    # which the host shell runs. See `sandbox/docker.py` for why the boundary has
+    # to be structural: the policy checks tool names, so in `workspace-write` a
+    # shell command could -- and, measured, did -- write outside the workspace.
+    if os.environ.get("ARM_DOCKER_SANDBOX", "") not in ("", "0", "false", "no"):
+        from ..sandbox.docker import DockerSandbox, containerized_bash
+        from ..tools.builtin import BashParams
+        from ..tools.definition import RegisteredTool, ToolDefinition
+
+        available, why = DockerSandbox.available()
+        if not available:
+            print(f"warning: the Docker sandbox is unavailable: {why}", file=sys.stderr)
+        else:
+            container = DockerSandbox(
+                sandbox,
+                network=os.environ.get("ARM_DOCKER_NETWORK", "") not in ("", "0", "false", "no"),
+            )
+            registry.replace(
+                RegisteredTool(
+                    definition=ToolDefinition(
+                        name="bash",
+                        description=(
+                            "Run a shell command inside a sandboxed container. The "
+                            "workspace is the only writable location and the "
+                            "network is unavailable; the container is discarded "
+                            "after the call."
+                        ),
+                        parameters=BashParams.model_json_schema(),
+                        requires_approval=True,
+                    ),
+                    body=containerized_bash(container),
+                    validator=BashParams,
+                )
+            )
+
+
 
     # Delegation. The child is a real loop over the same adapter, with its own
     # session and a restricted tool view; the runtime enforces the depth limit
