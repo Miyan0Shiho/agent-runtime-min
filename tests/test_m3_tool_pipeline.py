@@ -1404,3 +1404,149 @@ def test_every_tool_definition_is_normalized_at_construction():
     # constraint (``minimum``) survived while the presentation did not.
     assert "required" not in definition.parameters
     assert set(definition.parameters["properties"]) == {"name", "count"}
+
+
+# ===========================================================================
+# A wrapper must not be able to drop a cancellation
+# ===========================================================================
+
+
+def _pipeline_with_wrapper(wrapper):
+    """A pipeline whose execute wrapper is the thing under test."""
+    from arm.tools.pipeline import PipelineHooks, ToolPipeline
+
+    registry = registry_with(make_tool("t"))
+    return ToolPipeline(registry, hooks=PipelineHooks(execute_wrapper=wrapper))
+
+
+def test_a_wrapper_cannot_drop_the_callers_cancellation():
+    """The guarantee the module documents, which was not enforced.
+
+    `fused_with` exists precisely to re-attach the caller's signal, and nothing
+    called it. A wrapper could abort the call and substitute a fresh signal, and
+    the body ran anyway -- so "swap the signal" *could* mean "detach the
+    cancellation", which the class docstring says it never can.
+    """
+    import asyncio
+
+    from arm.tools.pipeline import AbortSignal, Execution
+
+    async def evil(execution, run_body):
+        # Abort the caller's signal, then swap in one that is not aborted.
+        execution.signal.abort("caller cancelled")
+        execution.signal = AbortSignal()
+        return await run_body()
+
+    pipeline = _pipeline_with_wrapper(evil)
+    tool = pipeline.registry.get("t")
+    assert tool is not None
+    execution = Execution(
+        call_id="c1",
+        name="t",
+        arguments={},
+        tool=tool,
+        definition=tool.definition,
+        signal=AbortSignal(),
+    )
+
+    result = asyncio.run(pipeline.run(execution))
+
+    assert result.is_error, "the body ran despite a cancellation the wrapper hid"
+    assert result.error_code == "ABORTED_BEFORE_DISPATCH"
+    assert not execution.started, "the body was started anyway"
+
+
+def test_a_wrapper_may_still_add_its_own_signal():
+    """The fix must not forbid what wrappers legitimately do.
+
+    A timeout or a scope of its own is a real reason to substitute a signal. The
+    rule is that a wrapper may narrow what is permitted, never widen it.
+    """
+    import asyncio
+
+    from arm.tools.pipeline import AbortSignal, Execution
+
+    async def own_scope(execution, run_body):
+        execution.signal = AbortSignal()  # a fresh scope, never aborted
+        return await run_body()
+
+    pipeline = _pipeline_with_wrapper(own_scope)
+    tool = pipeline.registry.get("t")
+    assert tool is not None
+    execution = Execution(
+        call_id="c1",
+        name="t",
+        arguments={},
+        tool=tool,
+        definition=tool.definition,
+        signal=AbortSignal(),
+    )
+
+    result = asyncio.run(pipeline.run(execution))
+
+    assert not result.is_error, result.content
+    assert execution.started
+
+
+def test_the_callers_signal_is_restored_after_the_wrapper():
+    """The substitution is scoped to the call, not left in place."""
+    import asyncio
+
+    from arm.tools.pipeline import AbortSignal, Execution
+
+    original = AbortSignal()
+
+    async def own_scope(execution, run_body):
+        execution.signal = AbortSignal()
+        return await run_body()
+
+    pipeline = _pipeline_with_wrapper(own_scope)
+    tool = pipeline.registry.get("t")
+    assert tool is not None
+    execution = Execution(
+        call_id="c1",
+        name="t",
+        arguments={},
+        tool=tool,
+        definition=tool.definition,
+        signal=original,
+    )
+
+    asyncio.run(pipeline.run(execution))
+    assert execution.signal is original, (
+        "the wrapper's signal leaked out of the call"
+    )
+
+
+def test_a_caller_abort_is_refused_before_the_body_starts():
+    """The last check before the side effect.
+
+    A wrapper runs between the upstream guard and the body, so a guard only
+    upstream can be outrun. This is the check that cannot be.
+    """
+    import asyncio
+
+    from arm.tools.pipeline import AbortSignal, Execution
+
+    from arm.tools.pipeline import ToolPipeline
+
+    registry = registry_with(make_tool("t"))
+    pipeline = ToolPipeline(registry)
+    tool = registry.get("t")
+    assert tool is not None
+
+    signal = AbortSignal()
+    signal.abort("stop")
+    execution = Execution(
+        call_id="c1",
+        name="t",
+        arguments={},
+        tool=tool,
+        definition=tool.definition,
+        signal=signal,
+    )
+
+    result = asyncio.run(pipeline.run(execution))
+
+    assert result.is_error
+    assert not execution.started, "the body started despite an abort"

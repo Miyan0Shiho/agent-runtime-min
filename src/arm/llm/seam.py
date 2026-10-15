@@ -178,12 +178,6 @@ class StreamCollector:
             if mapped is not None:
                 self._finish = mapped
 
-    def set_usage(self, usage: Usage | None) -> None:
-        self._usage = usage
-
-    def set_finish(self, reason: FinishReason) -> None:
-        self._finish = reason
-
     def set_error(self, message: str, code: str | None = None) -> None:
         self._error = message
         self._error_code = code

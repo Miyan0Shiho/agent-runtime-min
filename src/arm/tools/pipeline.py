@@ -519,6 +519,16 @@ class ToolPipeline:
         tool = execution.tool
 
         async def _body() -> ToolResult:
+            # The last check before the side effect. A wrapper runs before this,
+            # so a signal it substituted -- or an abort it raised -- is seen here
+            # rather than being outrun. Without this the guard upstream is the
+            # only one, and a wrapper sits between it and the body.
+            if execution.signal.aborted:
+                raise PipelineAbort(
+                    execution.signal.cause or "tool call aborted before dispatch",
+                    CODE_ABORTED_BEFORE_DISPATCH,
+                )
+
             execution.started = True
             execution.started_at = time.monotonic()
             try:
@@ -558,6 +568,20 @@ class ToolPipeline:
                     return ToolResult.fail("tool call aborted", code=CODE_ABORTED)
                 return result
 
+        # The caller's signal is captured before the wrapper runs, and re-fused
+        # onto whatever the wrapper substituted when the body is entered.
+        caller_signal = execution.signal
+
+        def _fused_run_body() -> Any:
+            """Enter the body with cancellation that cannot have been removed.
+
+            The wrapper's signal may add cancellation, never drop it: the fused
+            signal aborts when either the caller's or the wrapper's does.
+            """
+            if execution.signal is not caller_signal:
+                execution.signal = caller_signal.fused_with(execution.signal)
+            return _run_body()
+
         if self.hooks.execute_wrapper is None:
             try:
                 return await _run_body()
@@ -566,11 +590,19 @@ class ToolPipeline:
                 raise
 
         try:
-            # The caller's signal is re-fused: the wrapper's signal may add
-            # cancellation, never remove it.
+            # The caller's signal is re-fused after the wrapper has run its setup.
+            #
+            # A wrapper may legitimately substitute a signal to add cancellation
+            # (a timeout, a scope of its own). It must not be able to *remove*
+            # it, and simply restoring the original afterwards is not enough:
+            # the body runs inside the wrapper, so by then the substitution has
+            # already taken effect and an aborted call would execute anyway.
+            #
+            # Fusing means the effective signal aborts when *either* does, so a
+            # wrapper can only ever narrow what is permitted.
             original = execution.signal
             try:
-                return await self.hooks.execute_wrapper(execution, _run_body)
+                return await self.hooks.execute_wrapper(execution, _fused_run_body)
             finally:
                 execution.signal = original
         except asyncio.CancelledError:
