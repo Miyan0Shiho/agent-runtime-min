@@ -36,6 +36,13 @@ test:
 bench: test
 	@PYTHONPATH=$(SRC):. $(PY) -m arm.bench.main
 
+# Code that nothing calls. This project hit the same defect five times -- a
+# normalizer, a pre-empted validation, a scheduler, a delivery confirmation and an
+# approval service -- and every one was invisible to a passing test suite. The
+# check compares against a recorded baseline, so a *new* uncalled definition fails.
+deadcode:
+	@PYTHONPATH=$(SRC):. $(PY) -c "from pathlib import Path; from arm.bench.deadcode import run, render, load_baseline; f, ok = run(Path('src')); print(render(f, load_baseline())); raise SystemExit(0 if ok else 1)"
+
 # The claims the design documents left unverified, now measured. Separate from
 # `bench` because it answers a different question: `bench` asks whether the
 # acceptance criteria hold, this asks whether the design's own assumptions were

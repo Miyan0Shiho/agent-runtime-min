@@ -30,7 +30,6 @@ that assumes undo will take risks it otherwise would not.
 
 from __future__ import annotations
 
-import asyncio
 import base64
 import ctypes
 import logging
@@ -573,12 +572,3 @@ def _post_mouse_event(x: int, y: int, *, button: str) -> None:
             framework.CGEventPost(_TAP_HID, ctypes.c_void_p(event))
         finally:
             foundation.CFRelease(ctypes.c_void_p(event))
-
-
-async def capture_async(desktop: Desktop) -> str:
-    """Capture in an executor, so the event loop keeps running.
-
-    Screenshotting a Retina display takes a noticeable fraction of a second, and
-    blocking the loop for it would stall every other task in the runtime.
-    """
-    return await asyncio.get_running_loop().run_in_executor(None, desktop.capture)

@@ -462,7 +462,7 @@ def test_cli_wiring_persists_a_restorable_session(tmp_path):
 
     home = str(tmp_path)
     with FakeServer([{"text": "the answer"}]) as server:
-        runtime, session, handle, _scheduler = build_runtime(
+        runtime, session, handle, _scheduler, _mcp = build_runtime(
             session_id="cli",
             model="test-model",
             api_key="k",
@@ -497,7 +497,7 @@ def test_cli_resumes_an_existing_session(tmp_path):
 
     home = str(tmp_path)
     with FakeServer([{"text": "first answer"}]) as server:
-        runtime, session, handle, _scheduler = build_runtime(
+        runtime, session, handle, _scheduler, _mcp = build_runtime(
             session_id="resume",
             model="m",
             api_key="k",
@@ -510,7 +510,7 @@ def test_cli_resumes_an_existing_session(tmp_path):
         handle.close()
 
     with FakeServer([{"text": "second answer"}]) as server2:
-        runtime2, session2, handle2, _s2 = build_runtime(
+        runtime2, session2, handle2, _s2, _mcp = build_runtime(
             session_id="resume",
             model="m",
             api_key="k",
@@ -553,7 +553,7 @@ def test_the_cli_registers_the_team_tools_by_default(tmp_path, monkeypatch):
     assert team_enabled(), "teams are off by default"
 
     with FakeServer([{"text": "ok"}]) as server:
-        runtime, _session, handle, _scheduler = build_runtime(
+        runtime, _session, handle, _scheduler, _mcp = build_runtime(
             session_id="teams",
             model="test-model",
             api_key="k",
@@ -576,7 +576,7 @@ def test_the_cli_can_disable_the_team_tools(tmp_path, monkeypatch):
     assert not team_enabled()
 
     with FakeServer([{"text": "ok"}]) as server:
-        runtime, _session, handle, _scheduler = build_runtime(
+        runtime, _session, handle, _scheduler, _mcp = build_runtime(
             session_id="no-teams",
             model="test-model",
             api_key="k",
@@ -601,7 +601,7 @@ def test_the_cli_registers_a_scheduler_and_subagents(tmp_path):
     from arm.cli.main import build_runtime
 
     with FakeServer([{"text": "ok"}]) as server:
-        runtime, _session, handle, scheduler = build_runtime(
+        runtime, _session, handle, scheduler, _mcp = build_runtime(
             session_id="wired",
             model="test-model",
             api_key="k",
@@ -629,7 +629,7 @@ def test_computer_use_is_off_by_default(tmp_path, monkeypatch):
 
     monkeypatch.delenv("ARM_COMPUTER", raising=False)
     with FakeServer([{"text": "ok"}]) as server:
-        runtime, _session, handle, _scheduler = build_runtime(
+        runtime, _session, handle, _scheduler, _mcp = build_runtime(
             session_id="no-computer",
             model="test-model",
             api_key="k",
@@ -650,7 +650,7 @@ def test_computer_use_is_enabled_by_the_environment(tmp_path, monkeypatch):
 
     monkeypatch.setenv("ARM_COMPUTER", "1")
     with FakeServer([{"text": "ok"}]) as server:
-        runtime, _session, handle, _scheduler = build_runtime(
+        runtime, _session, handle, _scheduler, _mcp = build_runtime(
             session_id="computer",
             model="test-model",
             api_key="k",
@@ -676,7 +676,7 @@ def test_the_approval_gate_is_reachable_from_the_cli(tmp_path, monkeypatch):
 
     monkeypatch.delenv("ARM_COMPUTER", raising=False)
     with FakeServer([{"text": "ok"}]) as server:
-        runtime, _session, handle, _scheduler = build_runtime(
+        runtime, _session, handle, _scheduler, _mcp = build_runtime(
             session_id="gated",
             model="test-model",
             api_key="k",

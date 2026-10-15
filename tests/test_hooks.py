@@ -923,3 +923,101 @@ def test_a_missing_hook_command_does_not_break_the_turn(tmp_path: Path):
     assert results and results[0].data["is_error"] is False, (
         "a missing hook command blocked the tool"
     )
+
+
+# ===========================================================================
+# The turn-stopping point must actually be consulted
+# ===========================================================================
+
+
+def _stopping_bridge(tmp_path: Path, *, keep_going: bool):
+    """A bridge whose Stop hook either insists on another step or agrees."""
+    command, args = script(
+        tmp_path,
+        f'import json, sys\njson.load(sys.stdin)\n'
+        f'print(json.dumps({{"continue": {not keep_going}}}))\n',
+        name=f"stop_{keep_going}.py",
+    )
+    return HookBridge(
+        HookRunner(
+            [HookHandler(point=POINT_TURN_STOPPING, command=command, args=tuple(args))]
+        )
+    )
+
+
+def _run_turn(bridge, *, max_steps: int = 3):
+    from arm.agent.loop import Runtime
+    from arm.llm.mock import MockAdapter, text_response
+    from arm.prompt.assembler import PromptAssembler
+    from arm.session.session import Session
+    from arm.tools.registry import ToolRegistry
+
+    assembler = PromptAssembler()
+    assembler.set("core", "you are arm", priority=10)
+    session = Session.create("stop")
+    loop = Runtime(
+        session,
+        MockAdapter([text_response("done")] * 10),
+        ToolRegistry(),
+        assembler=assembler,
+        hook_bridge=bridge,
+        model="mock",
+        max_steps=max_steps,
+    )
+    loop.submit("x")
+    return asyncio.run(loop.run_until_idle())
+
+
+def test_a_turn_stopping_hook_can_ask_for_another_step(tmp_path: Path):
+    """The `Stop` point in both hook dialects.
+
+    A hook that decides the task is not actually done must be able to say so.
+    Without this the point existed in the vocabulary and nothing consulted it, so
+    a guard the user installed silently did nothing.
+    """
+    outcomes = _run_turn(_stopping_bridge(tmp_path, keep_going=True))
+    assert outcomes[0].steps > 1, (
+        "the hook asked for another step and the turn ended anyway"
+    )
+
+
+def test_a_turn_stopping_hook_that_agrees_lets_the_turn_end(tmp_path: Path):
+    """The complement: the hook must not block every turn."""
+    outcomes = _run_turn(_stopping_bridge(tmp_path, keep_going=False))
+    assert outcomes[0].steps == 1
+    assert outcomes[0].reason == "completed"
+
+
+def test_an_always_disagreeing_hook_is_bounded_by_max_steps(tmp_path: Path):
+    """A hook that never agrees must not loop forever.
+
+    The bound is the loop's own ``max_steps``, so a broken hook degrades into a
+    long turn rather than a hang.
+    """
+    outcomes = _run_turn(_stopping_bridge(tmp_path, keep_going=True), max_steps=3)
+    assert outcomes[0].steps <= 3, (
+        f"the turn ran {outcomes[0].steps} steps despite max_steps=3"
+    )
+
+
+def test_a_session_with_no_hooks_pays_nothing():
+    """The check must short-circuit, or every turn would pay for a feature it
+    does not use."""
+    outcomes = _run_turn(None)
+    assert outcomes[0].steps == 1
+
+
+def test_a_failing_stop_hook_does_not_break_the_turn():
+    """A hook fault is not a turn fault, and the turn should still end."""
+    bridge = HookBridge(
+        HookRunner(
+            [
+                HookHandler(
+                    point=POINT_TURN_STOPPING, command="/nonexistent/not-a-command"
+                )
+            ]
+        )
+    )
+    outcomes = _run_turn(bridge)
+    assert outcomes[0].reason == "completed"
+    assert outcomes[0].steps == 1

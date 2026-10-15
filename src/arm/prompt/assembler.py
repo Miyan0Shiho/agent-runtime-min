@@ -15,8 +15,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable, Iterable, Sequence
 
-from ..tools.definition import ToolDefinition
-from ..tools.schema import to_wire
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,22 +70,6 @@ class PromptAssembler:
     @property
     def names(self) -> tuple[str, ...]:
         return tuple(sorted(self._segments))
-
-
-def render_tools(tools: Sequence[ToolDefinition]) -> list[dict]:
-    """Render tool definitions for the wire.
-
-    Only *visible* tools are rendered. A hidden tool remains callable but is not
-    advertised, so it must not appear here.
-    """
-    return [
-        {
-            "name": tool.name,
-            "description": tool.description,
-            "parameters": to_wire(tool.parameters),
-        }
-        for tool in tools
-    ]
 
 
 def developer_message_for(

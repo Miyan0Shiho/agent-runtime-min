@@ -27,7 +27,7 @@ import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Mapping, Sequence
 
 from ..kernel.errors import (
     LogCorruptionError,
@@ -322,13 +322,3 @@ class JsonlLog:
 def read_log(path: str | os.PathLike[str]) -> ReadResult:
     """Convenience wrapper for reading a log without keeping a handle."""
     return JsonlLog(path).read()
-
-
-def write_log(path: str | os.PathLike[str], events: Iterable[Envelope]) -> int:
-    """Write a full log, replacing any existing file."""
-    target = Path(path)
-    target.parent.mkdir(parents=True, exist_ok=True, mode=_DIR_MODE)
-    log_file = JsonlLog(target)
-    if target.exists():
-        target.unlink()
-    return log_file.append(list(events))

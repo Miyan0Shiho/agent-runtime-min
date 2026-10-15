@@ -36,7 +36,6 @@ from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Sequence
 
 from ..kernel.errors import ArmError, describe
-from ..llm.seam import Request
 from ..session.events import (
     COMPACTION_END,
     COMPACTION_START,
@@ -442,27 +441,3 @@ class Compactor:
         except ValueError:
             return False
         return positions == list(range(positions[0], positions[0] + len(positions)))
-
-
-async def summarize_with_adapter(
-    adapter: Any, messages: Sequence[Message], *, model: str = ""
-) -> str:
-    """A ready-made summarizer that calls a model adapter.
-
-    A separate function so the compaction logic does not depend on the model seam
-    at all -- which is what lets compaction be tested exhaustively without a
-    network.
-    """
-    from ..llm.seam import collect
-
-    request = Request(
-        messages=(
-            *messages,
-            Message(role="user", content=(Block.text_block(SUMMARY_INSTRUCTION),)),
-        ),
-        model=model,
-    )
-    result = await collect(adapter, request)
-    if result.finish_reason == "error":
-        raise CompactionError(result.error or "summarization failed")
-    return result.text

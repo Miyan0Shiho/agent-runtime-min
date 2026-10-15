@@ -40,7 +40,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Generic, TypeVar
+from typing import Any, Awaitable, Generic, TypeVar
 
 log = logging.getLogger("arm.tools.drain")
 
@@ -255,19 +255,3 @@ class BodyCancelled(Exception):
     def __init__(self, key: str) -> None:
         super().__init__(f"body {key!r} cancelled itself")
         self.key = key
-
-
-async def run_with_drain(
-    bodies: dict[str, Callable[[], Awaitable[Any]]],
-) -> dict[str, StartedBody[Any]]:
-    """Start every body, wait for all of them, and return their outcomes.
-
-    A convenience wrapper for the common shape: a set of independent calls that
-    must all complete before the step exits.
-    """
-    scope = DrainScope()
-    async with scope:
-        for key, factory in bodies.items():
-            scope.start(key, factory())
-        await scope.wait_all()
-    return scope.results()

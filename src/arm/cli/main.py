@@ -197,7 +197,7 @@ def build_runtime(
     quiet: bool = False,
     approval_policy: str | None = None,
     sandbox_preset: str | None = None,
-) -> tuple[Runtime, Session, JsonlLog | None, ScheduleRuntime]:
+) -> tuple[Runtime, Session, JsonlLog | None, ScheduleRuntime, McpManager]:
     """Wire a runtime from environment configuration.
 
     Persistence is attached as a session listener rather than driven by the loop:
@@ -514,6 +514,10 @@ def build_runtime(
         if section:
             assembler.set("mcp", section, priority=50)
 
+    # MCP servers are child processes, so they must be closed or every session
+    # leaks one per server. The manager is returned with the rest so the caller
+    # that owns the process lifetime can close it.
+    #
     # The scheduler is wired here, not in the runtime, because firing a reminder
     # means *persisting it into a session* -- and the session is what this
     # function owns. A scheduler inside the loop would have to reach back out for
@@ -587,7 +591,7 @@ def build_runtime(
         model=model,
     )
 
-    return runtime, session, log_handle, scheduler
+    return runtime, session, log_handle, scheduler, mcp_manager
 
 
 def _print_events(session: Session, *, verbose: bool) -> None:
@@ -645,7 +649,7 @@ async def _run_task(
 
 
 def _cmd_run(args: argparse.Namespace) -> int:
-    runtime, session, handle, _scheduler = build_runtime(
+    runtime, session, handle, _scheduler, _mcp = build_runtime(
         session_id=args.session,
         model=args.model,
         home=args.home,
@@ -664,7 +668,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
 
 
 def _cmd_chat(args: argparse.Namespace) -> int:
-    runtime, session, handle, scheduler = build_runtime(
+    runtime, session, handle, scheduler, mcp_manager = build_runtime(
         session_id=args.session, model=args.model, home=args.home
     )
     try:
@@ -682,6 +686,9 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         orphans = asyncio.run(runtime.shutdown())
         if orphans:
             print(f"warning: {len(orphans)} subagent(s) did not stop", file=sys.stderr)
+        # MCP servers are child processes; leaving them running would leak one per
+        # session, and a server holding a lock or a port would block the next run.
+        asyncio.run(mcp_manager.close_all())
         if handle is not None:
             handle.close()
     return 0

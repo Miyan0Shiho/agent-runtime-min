@@ -636,6 +636,16 @@ class Runtime:
                     if outcome.finish_reason == "length"
                     else TURN_COMPLETED
                 )
+
+                # The model says it is finished; a hook may disagree. This is the
+                # `Stop` point in both hook dialects, and without it a hook that
+                # decided "the task is not actually done" had no way to say so --
+                # the point existed in the vocabulary and nothing consulted it.
+                if await self._hook_wants_another_step(reason, steps):
+                    # The hook asked for another step. Bounded by max_steps, so a
+                    # hook that always disagrees cannot loop forever.
+                    continue
+
                 return self._end_turn(
                     turn_index, reason, appended_before, steps=steps,
                     continue_loop=False,
@@ -651,6 +661,12 @@ class Runtime:
             # turn rather than starting a new one (S2).
             next_claim = self.inbox.claim()
             if next_claim.empty:
+                # This is the ordinary way a turn ends -- a text answer with no
+                # tool call -- so the hook point has to be consulted here too. It
+                # was wired into only the other path at first, which made a
+                # turn-stopping hook appear to do nothing at all.
+                if await self._hook_wants_another_step(TURN_COMPLETED, steps):
+                    continue
                 return self._end_turn(
                     turn_index,
                     TURN_COMPLETED,
@@ -667,6 +683,25 @@ class Runtime:
             steps=steps,
             continue_loop=False,
         )
+
+    async def _hook_wants_another_step(self, reason: str, steps: int) -> bool:
+        """Ask the hooks whether the turn is really finished.
+
+        The `Stop` point in both hook dialects. A hook that decides the task is
+        not done can keep the turn going, bounded by ``max_steps`` so a hook that
+        always disagrees cannot loop forever.
+
+        A session with no hooks pays nothing: the check short-circuits before any
+        work.
+        """
+        if self.hook_bridge is None:
+            return False
+        try:
+            decision = await self.hook_bridge.turn_stopping(reason, steps)
+        except Exception as exc:  # noqa: BLE001 - a hook fault is not a turn fault
+            log.warning("the turn-stopping hook failed: %s", exc)
+            return False
+        return bool(decision.stop)
 
     async def shutdown(self) -> list[str]:
         """Stop everything this runtime started.

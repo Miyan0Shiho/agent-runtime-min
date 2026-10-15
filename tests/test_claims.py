@@ -140,3 +140,95 @@ def test_running_every_measurement_produces_a_verdict():
     for measurement in measurements:
         assert measurement.name
         assert measurement.unit
+
+
+# ===========================================================================
+# The dead-code ratchet
+# ===========================================================================
+
+
+def test_the_dead_code_check_finds_definitions():
+    """A checker that finds nothing is a checker nobody trusts."""
+    from pathlib import Path
+
+    from arm.bench.deadcode import find_uncalled
+
+    findings = find_uncalled(Path("src"))
+    assert findings, "the check reported no uncalled definitions at all"
+    for finding in findings:
+        assert finding.definition.name
+        assert finding.definition.file
+
+
+def test_the_check_includes_methods():
+    """One of the five occurrences was a method.
+
+    A module-level-only scan would have missed ``confirm_delivery``, so the
+    checker has to look inside classes.
+    """
+    from pathlib import Path
+
+    from arm.bench.deadcode import find_uncalled
+
+    kinds = {f.definition.kind for f in find_uncalled(Path("src"))}
+    assert "method" in kinds, "methods are not being checked"
+
+
+def test_the_baseline_records_a_reason_for_every_entry():
+    """An unexplained entry silences the check forever.
+
+    The baseline is a record of what is genuinely an entry point, not a place to
+    hide findings.
+    """
+    from arm.bench.deadcode import KNOWN_ENTRY_POINTS
+
+    for name, reason in KNOWN_ENTRY_POINTS.items():
+        assert reason, f"{name} has no reason in the baseline"
+
+
+def test_a_new_finding_is_reported_as_new():
+    """The ratchet: recorded names stay quiet, anything new fails."""
+    from arm.bench.deadcode import Definition, Finding, new_findings
+
+    old = Finding(Definition("old", "C.old", "method", "a.py", 1), reason="known")
+    fresh = Finding(Definition("fresh", "C.fresh", "method", "a.py", 2))
+
+    baseline = {"a.py::C.old": "known"}
+    assert new_findings([old, fresh], baseline) == [fresh]
+
+
+def test_the_report_marks_new_findings():
+    from arm.bench.deadcode import Definition, Finding, render
+
+    fresh = Finding(Definition("fresh", "fresh", "function", "a.py", 1))
+    assert "NEW" in render([fresh], {})
+
+
+def test_the_report_says_so_when_there_is_nothing():
+    from arm.bench.deadcode import render
+
+    assert "no uncalled public definitions" in render([], {})
+
+
+def test_the_ratchet_passes_on_the_current_tree():
+    """The end-to-end check, which is what `make deadcode` runs.
+
+    A failure here means a new definition was added that nothing calls -- which is
+    how five defects in this project went unnoticed.
+    """
+    from pathlib import Path
+
+    from arm.bench.deadcode import new_findings, run
+
+    findings, ok = run(Path("src"))
+    fresh = new_findings(findings, _baseline_keys())
+    assert ok, "new uncalled definitions:\n" + "\n".join(
+        f"  {f.definition.file}:{f.definition.line} {f.definition.qualname}"
+        for f in fresh
+    )
+
+
+def _baseline_keys() -> dict[str, str]:
+    from arm.bench.deadcode import load_baseline
+
+    return load_baseline()

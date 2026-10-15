@@ -189,22 +189,6 @@ def is_reserved(event_type: str) -> bool:
     return event_type.startswith(RESERVED_PREFIXES)
 
 
-def validate_event_type(event_type: str) -> None:
-    """Reject names this build must not accept.
-
-    A reserved name is refused with a message that says *why*: it means a newer
-    build wrote this log, and pretending to understand it would be worse than
-    refusing.
-    """
-    if is_known(event_type):
-        return
-    if is_reserved(event_type):
-        raise ValueError(
-            f"event type {event_type!r} is reserved for a later format generation; "
-            "this build cannot represent it"
-        )
-
-
 # ---------------------------------------------------------------------------
 # Turn termination reasons
 # ---------------------------------------------------------------------------
