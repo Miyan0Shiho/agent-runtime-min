@@ -1,0 +1,10 @@
+{
+  "include": ["src", "tests", "benchmarks"],
+  "extraPaths": ["src"],
+  "venvPath": ".",
+  "venv": ".venv",
+  "pythonVersion": "3.11",
+  "typeCheckingMode": "basic",
+  "reportMissingImports": "error",
+  "reportUnusedImport": "warning"
+}

@@ -1,0 +1,32 @@
+[project]
+name = "agent-runtime-min"
+version = "0.1.0"
+description = "arm — an agent runtime built on one rule: what the model can see is already recorded."
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic>=2.13",
+    "httpx>=0.28",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+]
+
+[project.scripts]
+arm = "arm.cli.main:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/arm"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+asyncio_mode = "auto"
+filterwarnings = ["error::DeprecationWarning"]

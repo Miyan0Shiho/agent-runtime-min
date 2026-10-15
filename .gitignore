@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual environment (24M, reproducible from pyproject.toml)
+.venv/
+venv/
+.venv*/
+
+# Tooling caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.pyright/
+*.egg-info/
+build/
+dist/
+
+# Runtime state produced by `arm` itself.
+#
+# These are session logs, the schedule store and MCP/plugin caches -- data, not
+# source. They are excluded by the same rule that excludes any other generated
+# artifact: they are reproducible from a run, and a diff of a log file is not a
+# meaningful review.
+.arm/sessions/
+.arm/cache/
+schedule.json
+sessions/
+mcp.json
+config.json
+hooks.json
+
+# macOS
+.DS_Store
