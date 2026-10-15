@@ -24,7 +24,7 @@ from typing import Any, Sequence
 
 from ..agent.loop import LoopHooks, Runtime
 from ..llm.openai_adapter import OpenAICompatibleAdapter
-from ..approval.service import POLICY_ASK, ApprovalService, deny_all
+from ..approval.service import POLICY_ASK, ApprovalService, ask_in_terminal
 from ..goal.store import GoalStore
 from ..goal.tools import GoalTools
 from ..plan.mode import PlanMode, plan_tools
@@ -45,6 +45,8 @@ from ..hooks.runner import HookRunner
 from ..browser.cdp import DEFAULT_ENDPOINT as BROWSER_DEFAULT_ENDPOINT
 from ..browser.cdp import Browser
 from ..browser.tools import BrowserTools
+from ..computer.desktop import Desktop
+from ..computer.tools import ComputerTools
 from ..mcp.client import McpManager, McpServerConfig
 from ..plugins.registry import PluginRegistry, load_all as load_plugins
 from ..plugins.registry import parse_plugin_config
@@ -311,7 +313,14 @@ def build_runtime(
     # a prompt that nobody will answer -- and cannot accidentally be granted one
     # either.
     policy = approval_policy or os.environ.get("ARM_APPROVAL") or POLICY_ASK
-    answerers = [deny_all()] if policy == POLICY_ASK else []
+    # Under 'ask' the user is actually asked. The previous code installed
+    # deny_all here, so 'ask' meant 'always refuse' -- and because the service was
+    # not wired into the pipeline, nothing surfaced the difference.
+    #
+    # Under 'never' there are no answerers at all: the policy rejects inside the
+    # service, before any channel is consulted, so an unattended run cannot block
+    # on a prompt nobody will answer.
+    answerers = [ask_in_terminal()] if policy == POLICY_ASK else []
     approval = ApprovalService(policy=policy, answerers=answerers)
 
     # The sandbox decides what the session may touch. It is resolved once, so a
@@ -452,6 +461,18 @@ def build_runtime(
     if browser_endpoint:
         browser = Browser(browser_endpoint or BROWSER_DEFAULT_ENDPOINT)
         registry.register_many(BrowserTools(browser).tools())
+
+    # Computer use is off unless explicitly enabled: the desktop is not a
+    # sandbox, so a runtime that could drive the machine without being asked
+    # would be reaching into the user's mail, their bank and their terminal.
+    # ARM_COMPUTER=1 turns it on; the action tools still require approval.
+    if os.environ.get("ARM_COMPUTER", "") not in ("", "0", "false", "no"):
+        desktop = Desktop(enabled=True)
+        available, why = Desktop.available()
+        if available:
+            registry.register_many(ComputerTools(desktop).tools())
+        else:
+            print(f"warning: computer use is unavailable: {why}", file=sys.stderr)
 
     # External hooks are loaded from a file and attached to the pipeline's
     # existing pre-execute waterfall. A broken configuration produces diagnostics

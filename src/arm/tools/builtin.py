@@ -295,6 +295,7 @@ def builtin_tools() -> list[RegisteredTool]:
         body,
         *,
         parallel: bool = False,
+        needs_approval: bool = False,
     ) -> RegisteredTool:
         return RegisteredTool(
             definition=ToolDefinition(
@@ -302,6 +303,10 @@ def builtin_tools() -> list[RegisteredTool]:
                 description=description,
                 parameters=params.model_json_schema(),
                 concurrency_safe=(lambda _args: True) if parallel else None,
+                # Declared by the tool, not by a central list: the tool knows
+                # what it does, and a list would drift silently -- a new
+                # dangerous tool would simply run.
+                requires_approval=needs_approval,
             ),
             body=body,
             validator=params,
@@ -315,14 +320,27 @@ def builtin_tools() -> list[RegisteredTool]:
             read_file,
             parallel=True,
         ),
-        make("write", "Write content to a file, creating it if needed.", WriteParams, write_file),
+        make(
+            "write",
+            "Write content to a file, creating it if needed.",
+            WriteParams,
+            write_file,
+            needs_approval=True,
+        ),
         make(
             "edit",
             "Replace a unique string in a file.",
             EditParams,
             edit_file,
+                    needs_approval=True,
         ),
-        make("bash", "Run a shell command and return its output.", BashParams, run_bash),
+        make(
+            "bash",
+            "Run a shell command and return its output.",
+            BashParams,
+            run_bash,
+            needs_approval=True,
+        ),
         make(
             "glob",
             "List files matching a glob pattern.",

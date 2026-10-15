@@ -403,6 +403,95 @@ def answer_from(predicate: Callable[[ApprovalRequest], bool]) -> Answerer:
     return answer
 
 
+def gating_hook(service: "ApprovalService", *, session_id: str = "") -> Any:
+    """Ask for approval when a tool declares that it needs one.
+
+    This is the piece that was missing: the service was built, tested, passed to
+    the runtime, and **never consulted**, so approval gated nothing at all. A
+    policy that gates nothing is worse than no policy, because the caller
+    believes something is being checked.
+
+    The decision to ask comes from the tool's own ``requires_approval`` flag
+    rather than from a central list. A central list drifts: a new dangerous tool
+    would need someone to remember to register it, and forgetting is silent --
+    the tool simply runs.
+
+    A tool that does not require approval passes through without consulting the
+    service at all, so the common path costs nothing.
+    """
+    from ..tools.pipeline import Decision as PipelineDecision
+
+    async def hook(execution: Any, _next: Any) -> Any:
+        definition = getattr(execution, "definition", None)
+        if definition is None or not getattr(definition, "requires_approval", False):
+            return await _next()
+
+        request = ApprovalRequest(
+            tool=str(getattr(execution, "name", "")),
+            reason=(
+                f'"{getattr(execution, "name", "")}" changes things outside this '
+                "session and needs approval"
+            ),
+            arguments=dict(getattr(execution, "arguments", {}) or {}),
+            call_id=str(getattr(execution, "call_id", "")),
+        )
+        decision = await service.request(request, session_id=session_id)
+        if decision.granted:
+            return await _next()
+
+        # Not granted: short-circuit. Not calling next() is what a deny means in
+        # a waterfall, and the reason is carried so the model learns why.
+        reason = decision.reason or "approval was not granted"
+        return PipelineDecision.deny(reason)
+
+    return hook
+
+
+def ask_in_terminal(
+    prompt: Callable[[str], str] | None = None,
+    *,
+    output: Callable[[str], None] | None = None,
+) -> Answerer:
+    """An answerer that asks the person at the terminal.
+
+    This is what ``ask`` is supposed to mean. The CLI previously installed
+    ``deny_all`` under that policy, so "ask" behaved as "always refuse" -- and
+    because the service was not wired into the pipeline at all, nothing revealed
+    the difference.
+
+    Every outcome other than an explicit yes is a refusal. A blank line, an
+    unrecognised word, EOF, or an interrupt all mean no: a prompt that treats
+    silence as consent would grant permission to whoever walked away from the
+    keyboard.
+    """
+    import sys
+
+    ask = prompt or input
+    write = output or (lambda text: print(text, file=sys.stderr))
+
+    def answer(request: ApprovalRequest) -> str:
+        write("")
+        write(f"approval needed: {request.tool}")
+        if request.reason:
+            write(f"  {request.reason}")
+        arguments = request.arguments
+        if arguments:
+            rendered = ", ".join(f"{k}={v!r}" for k, v in list(arguments.items())[:6])
+            write(f"  arguments: {rendered}")
+
+        try:
+            reply = ask("allow this once? [y/N] ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            # No answer is not consent.
+            return OUTCOME_REJECTED
+
+        if reply in ("y", "yes"):
+            return OUTCOME_ALLOWED_ONCE
+        return OUTCOME_REJECTED
+
+    return answer
+
+
 def approval_hook(
     service: "ApprovalService",
     *,

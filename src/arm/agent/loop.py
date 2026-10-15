@@ -180,14 +180,23 @@ class Runtime:
         # to live.
         self.hook_bridge = hook_bridge
         pipeline_hooks = None
-        if hook_bridge is not None or sandbox is not None:
+        if hook_bridge is not None or sandbox is not None or approval is not None:
             from ..tools.pipeline import PipelineHooks
 
             pre_execute: tuple[Any, ...] = ()
+            # Approval runs before the external hook bridge: a hook is an
+            # addition the user installed, and it should not be able to approve
+            # on the user's behalf by running before the gate.
+            if approval is not None:
+                from ..approval.service import gating_hook
+
+                pre_execute = (
+                    gating_hook(approval, session_id=session.session_id),
+                )
             if hook_bridge is not None:
                 from ..hooks.bridge import pipeline_hook
 
-                pre_execute = (pipeline_hook(hook_bridge),)
+                pre_execute = (*pre_execute, pipeline_hook(hook_bridge))
 
             # The sandbox is enforced by an execute wrapper rather than by each
             # tool: the wrapper is on the mandatory path, so a tool cannot be

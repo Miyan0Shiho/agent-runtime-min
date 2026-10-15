@@ -887,3 +887,196 @@ def test_every_filesystem_tool_is_covered_by_the_table():
     covered = set(TOOL_OPERATIONS) | set(TOOL_PATH_LISTS)
     for name in ("read", "write", "edit", "bash"):
         assert name in covered, f"{name!r} bypasses the sandbox"
+
+
+# ===========================================================================
+# The approval service must actually gate the pipeline
+# ===========================================================================
+
+
+def _run_tool(tool_name: str, arguments: dict, answerer):
+    """Run one tool call through a real loop and return the tool result."""
+    import asyncio
+
+    from arm.agent.loop import Runtime
+    from arm.approval.service import POLICY_ASK, ApprovalService
+    from arm.llm.mock import MockAdapter, text_response, tool_response
+    from arm.prompt.assembler import PromptAssembler
+    from arm.session.session import Session
+    from arm.tools.builtin import builtin_tools
+    from arm.tools.registry import ToolRegistry
+
+    registry = ToolRegistry()
+    registry.register_many(builtin_tools())
+    assembler = PromptAssembler()
+    assembler.set("core", "you are arm", priority=10)
+
+    session = Session.create("approval")
+    loop = Runtime(
+        session,
+        MockAdapter([tool_response(("c1", tool_name, arguments)), text_response("ok")]),
+        registry,
+        assembler=assembler,
+        approval=ApprovalService(policy=POLICY_ASK, answerers=[answerer]),
+        model="mock",
+    )
+    loop.submit("do it")
+    asyncio.run(loop.run_until_idle())
+    return next(e for e in session if e.type == "tool/result")
+
+
+def test_a_rejected_approval_blocks_the_tool(tmp_path):
+    """The service was built, tested, passed to the runtime -- and never consulted.
+
+    Approval gated nothing at all, which is worse than no approval: the caller
+    believes something is being checked.
+    """
+    from arm.approval.service import answer_from
+
+    target = tmp_path / "should-not-exist.txt"
+    result = _run_tool(
+        "write",
+        {"path": str(target), "content": "x"},
+        answer_from(lambda _request: False),
+    )
+
+    assert result.data["is_error"] is True, "the tool ran despite a refusal"
+    assert "rejected" in result.data["message"]["content"][0]["text"]
+    assert not target.exists(), "the refused write happened anyway"
+
+
+def test_a_granted_approval_lets_the_tool_run(tmp_path):
+    """The complement: the gate must not block everything."""
+    from arm.approval.service import answer_from
+
+    target = tmp_path / "written.txt"
+    result = _run_tool(
+        "write",
+        {"path": str(target), "content": "hello"},
+        answer_from(lambda _request: True),
+    )
+
+    assert result.data["is_error"] is False, result.data["message"]["content"][0]["text"]
+    assert target.exists()
+    assert target.read_text() == "hello"
+
+
+def test_the_approval_request_names_the_tool(tmp_path):
+    """The answerer must be able to decide, which means knowing what is being asked."""
+    from arm.approval.service import answer_from
+
+    seen: list[str] = []
+
+    def record(request) -> bool:
+        seen.append(request.tool)
+        return True
+
+    _run_tool("bash", {"command": "echo hi"}, answer_from(record))
+    assert seen == ["bash"], f"the answerer was asked about {seen}"
+
+
+def test_a_tool_that_needs_no_approval_never_asks():
+    """The common path must cost nothing.
+
+    A read is not gated, so the answerer must not even be consulted -- otherwise
+    every harmless call would prompt.
+    """
+    from arm.approval.service import answer_from
+
+    seen: list[str] = []
+
+    def record(request) -> bool:
+        seen.append(request.tool)
+        return True
+
+    import tempfile
+    from pathlib import Path
+
+    readable = Path(tempfile.mkdtemp()) / "file.txt"
+    readable.write_text("content")
+
+    result = _run_tool("read", {"path": str(readable)}, answer_from(record))
+
+    assert result.data["is_error"] is False
+    assert seen == [], f"a read prompted for approval: {seen}"
+
+
+def test_a_denied_call_says_why():
+    """The model must learn what was refused, or it will simply retry."""
+    from arm.approval.service import answer_from
+
+    result = _run_tool(
+        "bash", {"command": "echo hi"}, answer_from(lambda _request: False)
+    )
+    text = result.data["message"]["content"][0]["text"]
+    assert "bash" in text
+    assert "reject" in text.lower()
+
+
+def test_the_gated_tools_are_the_dangerous_ones():
+    """Declared by the tool, not by a central list that would drift silently."""
+    from arm.tools.builtin import builtin_tools
+
+    gated = {t.definition.name for t in builtin_tools() if t.definition.requires_approval}
+    assert gated == {"write", "edit", "bash"}, gated
+
+
+def test_reading_tools_are_not_gated():
+    """A read changes nothing outside the session."""
+    from arm.tools.builtin import builtin_tools
+
+    for tool in builtin_tools():
+        if tool.definition.name in ("read", "glob", "grep"):
+            assert not tool.definition.requires_approval, tool.definition.name
+
+
+def test_the_terminal_answerer_refuses_on_a_blank_line():
+    """A prompt that treats silence as consent grants permission to whoever
+    walked away from the keyboard."""
+    from arm.approval.service import OUTCOME_REJECTED, ask_in_terminal
+
+    answerer = ask_in_terminal(prompt=lambda _prompt: "", output=lambda _text: None)
+    from arm.approval.service import ApprovalRequest
+
+    outcome = answerer(
+        ApprovalRequest(tool="bash", reason="", arguments={}, call_id="c1")
+    )
+    assert outcome == OUTCOME_REJECTED
+
+
+def test_the_terminal_answerer_grants_on_yes():
+    from arm.approval.service import (
+        OUTCOME_ALLOWED_ONCE,
+        ApprovalRequest,
+        ask_in_terminal,
+    )
+
+    answerer = ask_in_terminal(prompt=lambda _prompt: "y", output=lambda _text: None)
+    outcome = answerer(
+        ApprovalRequest(tool="bash", reason="", arguments={}, call_id="c1")
+    )
+    assert outcome == OUTCOME_ALLOWED_ONCE
+
+
+def test_the_terminal_answerer_refuses_on_eof():
+    """An interrupted prompt is not consent."""
+    from arm.approval.service import OUTCOME_REJECTED, ApprovalRequest, ask_in_terminal
+
+    def explode(_prompt: str) -> str:
+        raise EOFError
+
+    answerer = ask_in_terminal(prompt=explode, output=lambda _text: None)
+    outcome = answerer(
+        ApprovalRequest(tool="bash", reason="", arguments={}, call_id="c1")
+    )
+    assert outcome == OUTCOME_REJECTED
+
+
+def test_the_terminal_answerer_refuses_an_unrecognised_word():
+    from arm.approval.service import OUTCOME_REJECTED, ApprovalRequest, ask_in_terminal
+
+    answerer = ask_in_terminal(prompt=lambda _prompt: "maybe", output=lambda _text: None)
+    outcome = answerer(
+        ApprovalRequest(tool="bash", reason="", arguments={}, call_id="c1")
+    )
+    assert outcome == OUTCOME_REJECTED

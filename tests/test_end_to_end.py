@@ -617,3 +617,76 @@ def test_the_cli_registers_a_scheduler_and_subagents(tmp_path):
 
     for tool in ("subagent", "schedule_create", "schedule_list"):
         assert tool in names, f"{tool} was not registered"
+
+
+def test_computer_use_is_off_by_default(tmp_path, monkeypatch):
+    """The desktop is not a sandbox.
+
+    A runtime that could drive the machine without being asked would be reaching
+    into the user's mail, their bank and their terminal.
+    """
+    from arm.cli.main import build_runtime
+
+    monkeypatch.delenv("ARM_COMPUTER", raising=False)
+    with FakeServer([{"text": "ok"}]) as server:
+        runtime, _session, handle, _scheduler = build_runtime(
+            session_id="no-computer",
+            model="test-model",
+            api_key="k",
+            base_url=server.base_url,
+            home=str(tmp_path),
+        )
+        names = runtime.registry.view().known
+        assert handle is not None
+        handle.close()
+
+    assert not any(name.startswith("screen_") for name in names), (
+        "the computer-use tools were registered without being asked for"
+    )
+
+
+def test_computer_use_is_enabled_by_the_environment(tmp_path, monkeypatch):
+    from arm.cli.main import build_runtime
+
+    monkeypatch.setenv("ARM_COMPUTER", "1")
+    with FakeServer([{"text": "ok"}]) as server:
+        runtime, _session, handle, _scheduler = build_runtime(
+            session_id="computer",
+            model="test-model",
+            api_key="k",
+            base_url=server.base_url,
+            home=str(tmp_path),
+        )
+        names = runtime.registry.view().known
+        assert handle is not None
+        handle.close()
+
+    for tool in ("screen_capture", "screen_windows", "screen_click"):
+        assert tool in names, f"{tool} was not registered"
+
+
+def test_the_approval_gate_is_reachable_from_the_cli(tmp_path, monkeypatch):
+    """The gate must be wired, not merely available.
+
+    The approval service was constructed, passed to the runtime and never
+    consulted -- so approval gated nothing while every unit test passed.
+    """
+    from arm.agent.loop import Runtime
+    from arm.cli.main import build_runtime
+
+    monkeypatch.delenv("ARM_COMPUTER", raising=False)
+    with FakeServer([{"text": "ok"}]) as server:
+        runtime, _session, handle, _scheduler = build_runtime(
+            session_id="gated",
+            model="test-model",
+            api_key="k",
+            base_url=server.base_url,
+            home=str(tmp_path),
+        )
+        assert isinstance(runtime, Runtime)
+        pipeline = runtime.dispatcher.pipeline
+        assert pipeline.hooks.pre_execute, (
+            "no pre-execute hook is installed, so nothing gates a tool call"
+        )
+        assert handle is not None
+        handle.close()

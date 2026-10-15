@@ -143,6 +143,14 @@ class ToolDefinition:
     #: Arbitrary metadata for policy layers. Never sent to the model.
     meta: Mapping[str, Any] = field(default_factory=lambda: FrozenDict())
 
+    #: Whether a call to this tool needs explicit approval.
+    #:
+    #: Declared by the tool rather than configured centrally, because the tool is
+    #: the thing that knows what it does. A central list would drift: every new
+    #: tool would need someone to remember to add it, and the failure is silent --
+    #: a dangerous tool simply runs.
+    requires_approval: bool = False
+
     def __post_init__(self) -> None:
         if not self.name:
             raise ValueError("tool name must not be empty")
