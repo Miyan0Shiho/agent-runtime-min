@@ -42,6 +42,9 @@ from ..subagent.tool import SubagentTool
 from ..hooks.bridge import HookBridge
 from ..hooks.protocol import DIALECT_CLAUDE, load_config as load_hook_config
 from ..hooks.runner import HookRunner
+from ..browser.cdp import DEFAULT_ENDPOINT as BROWSER_DEFAULT_ENDPOINT
+from ..browser.cdp import Browser
+from ..browser.tools import BrowserTools
 from ..mcp.client import McpManager, McpServerConfig
 from ..plugins.registry import PluginRegistry, load_all as load_plugins
 from ..plugins.registry import parse_plugin_config
@@ -439,6 +442,16 @@ def build_runtime(
         plugin_failures = load_plugins(plugin_registry, plugin_specs)
         for spec, reason in plugin_failures.items():
             print(f"warning: plugin {spec} did not load: {reason}", file=sys.stderr)
+
+    # The browser seam is registered only when an endpoint is configured.
+    #
+    # Nothing is discovered by scanning: a runtime that found a browser on its own
+    # would attach to whatever it found, and what it would find is the user's
+    # logged-in session. Requiring ARM_BROWSER makes attaching a deliberate act.
+    browser_endpoint = os.environ.get("ARM_BROWSER", "")
+    if browser_endpoint:
+        browser = Browser(browser_endpoint or BROWSER_DEFAULT_ENDPOINT)
+        registry.register_many(BrowserTools(browser).tools())
 
     # External hooks are loaded from a file and attached to the pipeline's
     # existing pre-execute waterfall. A broken configuration produces diagnostics
