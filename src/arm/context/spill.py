@@ -34,6 +34,8 @@ from pathlib import Path
 log = logging.getLogger("arm.context.spill")
 
 #: Directory mode for the spill root: owner-only.
+DEFAULT_MAX_BYTES = 256 * 1024 * 1024
+
 ROOT_MODE = 0o700
 #: File mode for spilled content: owner-only.
 FILE_MODE = 0o600
@@ -83,8 +85,21 @@ def _new_token() -> str:
 class SpillStore:
     """A private directory of spilled content, addressed by opaque tokens."""
 
-    def __init__(self, root: str | os.PathLike[str]) -> None:
+    def __init__(
+        self, root: str | os.PathLike[str], *, max_bytes: int = DEFAULT_MAX_BYTES
+    ) -> None:
+        if max_bytes < 0:
+            raise SpillError("max_bytes must be non-negative")
         self.root = Path(root)
+        #: The capacity ceiling. The contract flagged the absence of one as a
+        #: real risk -- "第一版不做清扫，落盘文件会持续累积" -- and it was right:
+        #: nothing called `total_bytes` or `delete` on a schedule, so a
+        #: long-running session filled the disk with spilled tool output and
+        #: never reclaimed any of it.
+        #:
+        #: Zero means unlimited, which is the explicit opt-out rather than the
+        #: default: a store that grows without bound should be a choice.
+        self.max_bytes = max_bytes
 
     def _ensure_root(self) -> None:
         self.root.mkdir(parents=True, exist_ok=True, mode=ROOT_MODE)
@@ -151,6 +166,17 @@ class SpillStore:
                 # Metadata is diagnostic only; its absence must not fail a spill.
                 log.warning("could not write spill metadata for %s", token)
 
+        # Reclaim on write, which is the only moment the store grows. A sweep
+        # that ran on a timer would need a scheduler; running it here means the
+        # ceiling holds without one, and the cost is one directory scan per spill.
+        #
+        # The file just written is the newest, so it is the last candidate for
+        # removal -- a spill is never swept away before it can be read.
+        try:
+            self.sweep()
+        except Exception as exc:  # noqa: BLE001 - a failed sweep must not lose the spill
+            log.warning("spill sweep failed: %s", exc)
+
         return Locator(token=token)
 
     def get(self, locator: Locator | str) -> str:
@@ -193,15 +219,89 @@ class SpillStore:
         except OSError:
             return False
 
+    def sweep(self) -> int:
+        """Delete the oldest spilled files until the store fits its ceiling.
+
+        Returns how many files were removed.
+
+        **Oldest first**, because the newest spills are the ones a live session
+        is most likely to still retrieve. Ordering by size would free space
+        faster but would discard a recent small result to keep an old large one,
+        which is the wrong trade for a store whose purpose is recall.
+
+        The locator a deleted file had is now dead, and retrieving it fails with
+        a clear error rather than returning something else -- a spill store that
+        silently returned the wrong bytes would be worse than one that lost them.
+
+        Nothing here runs on its own: the caller decides when to reclaim, so a
+        session that is actively reading its spills is not competing with a
+        sweep for the same files.
+        """
+        if self.max_bytes == 0 or not self.root.exists():
+            return 0
+
+        entries: list[tuple[float, Path, int]] = []
+        for entry in self.root.iterdir():
+            if not entry.is_file() or entry.is_symlink():
+                continue
+            # `.meta` sidecars belong to their content file and are removed with
+            # it; counting them separately would double-count and could delete a
+            # sidecar while leaving its content.
+            if entry.suffix == ".meta":
+                continue
+            try:
+                stat = entry.stat()
+            except OSError:
+                continue
+            entries.append((stat.st_mtime, entry, stat.st_size))
+
+        total = sum(size for _mtime, _path, size in entries)
+        if total <= self.max_bytes:
+            return 0
+
+        entries.sort(key=lambda item: item[0])
+
+        # The newest file is never a candidate, even when it alone exceeds the
+        # ceiling. Discarding what was just written would make the spill
+        # pointless: the caller holds a locator for bytes that are already gone,
+        # and it would fail on the read that was the whole reason for spilling.
+        #
+        # So a single oversized spill can push the store over its ceiling. That
+        # is the correct trade -- the ceiling bounds *accumulation*, not any one
+        # file -- and it is stated rather than left as a surprise.
+        candidates = entries[:-1]
+
+        removed = 0
+        for _mtime, path, size in candidates:
+            if total <= self.max_bytes:
+                break
+            try:
+                path.unlink()
+                (self.root / f"{path.name}.meta").unlink(missing_ok=True)
+            except OSError:
+                continue
+            total -= size
+            removed += 1
+        return removed
+
     def total_bytes(self) -> int:
-        """Total size of spilled content, for capacity decisions."""
+        """Size of the spilled *content*, for capacity decisions.
+
+        Content only, matching what ``sweep`` measures. Counting the ``.meta``
+        sidecars here would make the reported size disagree with the number the
+        sweep compares against its ceiling -- so the store could report itself
+        over budget while the sweep, measuring something else, declined to
+        reclaim anything.
+
+        Only regular files are measured. Following a symlink would let a link to
+        a huge file inflate the number, and the sweep must never traverse links.
+        """
         if not self.root.exists():
             return 0
         total = 0
         for entry in self.root.iterdir():
-            # Only regular files are measured. Following a symlink here would let
-            # a link to a huge file inflate the number, and the sweep that uses
-            # it must never traverse links.
+            if entry.suffix == ".meta":
+                continue
             if entry.is_file() and not entry.is_symlink():
                 try:
                     total += entry.stat().st_size

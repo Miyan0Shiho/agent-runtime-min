@@ -731,3 +731,106 @@ def test_original_events_survive_compaction():
             and e.data["message"]["content"][0]["text"] == text
             for e in session
         ), "an original event was removed from the log"
+
+
+# ===========================================================================
+# The spill store must have a capacity ceiling
+# ===========================================================================
+
+
+def test_the_spill_store_reclaims_when_it_exceeds_its_ceiling(tmp_path):
+    """The contract flagged the absence of a capacity policy as a real risk.
+
+    "第一版不做清扫，落盘文件会持续累积" -- and it was right. `total_bytes` and
+    `delete` existed, nothing called either on a schedule, and a long-running
+    session filled the disk with spilled tool output and never reclaimed any.
+    """
+    from arm.context.spill import SpillStore
+
+    store = SpillStore(tmp_path / "spill", max_bytes=3_000)
+    for index in range(10):
+        store.put("x" * 1_000, session_id=f"s{index}")
+
+    assert store.total_bytes() <= 3_000, (
+        f"the store holds {store.total_bytes()} bytes against a 3000 ceiling"
+    )
+
+
+def test_the_newest_spill_survives_the_sweep(tmp_path):
+    """Oldest first, because the newest is what a live session still needs.
+
+    Ordering by size would free space faster and discard a recent small result to
+    keep an old large one -- the wrong trade for a store whose purpose is recall.
+    """
+    from arm.context.spill import SpillError, SpillStore
+
+    store = SpillStore(tmp_path / "spill", max_bytes=3_000)
+    locators = [store.put("x" * 1_000, session_id=f"s{i}") for i in range(5)]
+
+    # The newest is retrievable; the oldest is gone.
+    assert len(store.get(locators[-1])) == 1_000
+    with pytest.raises(SpillError):
+        store.get(locators[0])
+
+
+def test_a_swept_locator_fails_clearly_rather_than_returning_other_bytes(tmp_path):
+    """A store that silently returned the wrong bytes would be worse than one
+    that lost them."""
+    from arm.context.spill import SpillError, SpillStore
+
+    store = SpillStore(tmp_path / "spill", max_bytes=2_000)
+    first = store.put("x" * 1_000, session_id="a")
+    for index in range(4):
+        store.put("y" * 1_000, session_id=f"b{index}")
+
+    with pytest.raises(SpillError):
+        store.get(first)
+
+
+def test_the_ceiling_is_measured_the_same_way_it_is_enforced(tmp_path):
+    """`total_bytes` and `sweep` must agree on what they are measuring.
+
+    Counting the `.meta` sidecars in one and not the other would let the store
+    report itself over budget while the sweep declined to reclaim anything.
+    """
+    from arm.context.spill import SpillStore
+
+    store = SpillStore(tmp_path / "spill", max_bytes=3_000)
+    for index in range(5):
+        store.put("x" * 1_000, session_id=f"s{index}")
+
+    assert store.total_bytes() <= 3_000, (
+        "the reported size disagrees with the enforced ceiling"
+    )
+
+
+def test_a_zero_ceiling_means_unlimited(tmp_path):
+    """Growing without bound should be a choice, not the default."""
+    from arm.context.spill import SpillStore
+
+    store = SpillStore(tmp_path / "spill", max_bytes=0)
+    for index in range(10):
+        store.put("x" * 1_000, session_id=f"s{index}")
+
+    assert store.total_bytes() == 10_000, "a zero ceiling swept anyway"
+
+
+def test_a_negative_ceiling_is_refused(tmp_path):
+    """A negative ceiling is a configuration error, not 'unlimited'."""
+    from arm.context.spill import SpillError, SpillStore
+
+    with pytest.raises(SpillError, match="non-negative"):
+        SpillStore(tmp_path / "spill", max_bytes=-1)
+
+
+def test_a_sweep_does_not_remove_the_file_just_written(tmp_path):
+    """A spill that is discarded before it can be read is not a spill."""
+    from arm.context.spill import SpillStore
+
+    # The ceiling is smaller than one spill, so the newest must still survive.
+    store = SpillStore(tmp_path / "spill", max_bytes=100)
+    locator = store.put("x" * 5_000, session_id="big")
+
+    assert len(store.get(locator)) == 5_000, (
+        "the store swept away the spill it had just written"
+    )
