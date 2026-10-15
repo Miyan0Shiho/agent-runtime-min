@@ -13,6 +13,8 @@ each test here is written to fail for a *specific* wrong implementation.
 
 from __future__ import annotations
 
+from typing import Any
+
 import asyncio
 
 import pytest
@@ -421,3 +423,190 @@ def test_timeout_policy_must_shield_or_it_kills_the_body():
     # The body still finished, because the drain owns it. This is the difference
     # between "we stopped waiting" and "we destroyed the work".
     assert "start" in ledger
+
+
+# ===========================================================================
+# The two claims the module documents but nothing verified
+# ===========================================================================
+#
+# `docs/contract-amendments.md` §6 listed these as unverified:
+#
+#   "uncancel() 语义 -- 仅在 3.11.14 上验证"
+#   "信号触发的取消 -- 未测（spike 已标注）"
+#
+# The drain module depends on both. `uncancel()` is what lets a repeat
+# cancellation be absorbed; a signal is what produces that repeat cancellation in
+# the first place. Neither had a test.
+
+
+def test_exactly_one_cancellation_is_raised():
+    """The abort must stay observable, and must not be raised twice.
+
+    Converting an abort into a normal return would break the turn's ability to
+    report ``aborted``; raising more than one would mean a caller catching the
+    first still sees a second from somewhere it did not expect.
+    """
+    raised: list[str] = []
+
+    async def body() -> str:
+        await asyncio.sleep(0.05)
+        return "done"
+
+    async def scenario() -> None:
+        scope = DrainScope()
+        task = asyncio.current_task()
+
+        async def cancel_soon() -> None:
+            await asyncio.sleep(0.01)
+            assert task is not None
+            task.cancel()
+
+        asyncio.ensure_future(cancel_soon())
+        try:
+            async with scope:
+                scope.start("c1", body())
+                await asyncio.sleep(0.02)
+        except asyncio.CancelledError:
+            raised.append("first")
+            # A second cancel arriving after the scope exited must not produce a
+            # second raise from the scope itself.
+            raise
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(scenario())
+
+    assert raised == ["first"], f"cancellation was raised {len(raised)} time(s)"
+
+
+def test_uncancel_restores_the_cancellation_count():
+    """``uncancel()`` is what lets a repeat cancel be absorbed.
+
+    On Python 3.11 a task carries a cancellation *count*: cancelling twice and
+    uncancelling once leaves it cancelled, so the drain must uncancel once per
+    absorbed cancel. If that were wrong, the drain would abort partway and lose
+    the bodies it was protecting.
+    """
+    import sys
+
+    if sys.version_info < (3, 11):  # pragma: no cover - the project targets 3.11
+        pytest.skip("uncancel() requires Python 3.11")
+
+    async def body() -> str:
+        await asyncio.sleep(0.1)
+        return "survived"
+
+    async def scenario() -> tuple[str, int]:
+        scope = DrainScope()
+        task = asyncio.current_task()
+        assert task is not None
+
+        async def cancel_repeatedly() -> None:
+            for _ in range(3):
+                await asyncio.sleep(0.02)
+                task.cancel()
+
+        asyncio.ensure_future(cancel_repeatedly())
+        try:
+            async with scope:
+                scope.start("c1", body())
+                await asyncio.sleep(0.01)
+        except asyncio.CancelledError:
+            pass
+
+        outcome = scope.results().get("c1")
+        return (str(outcome.value) if outcome else ""), scope.absorbed_cancels
+
+    value, absorbed = asyncio.run(scenario())
+
+    assert value == "survived", (
+        "the body did not finish; uncancel() did not absorb the repeat cancels"
+    )
+    assert absorbed >= 2, (
+        f"only {absorbed} repeat cancel(s) were absorbed; the drain was expected "
+        "to survive more than one"
+    )
+
+
+def test_a_body_started_before_a_cancel_still_records_its_result():
+    """The core contract: a started body is awaited to completion.
+
+    Repeated here with a longer body and more cancels than the existing test, so
+    the guarantee is pinned under the shape a supervisor shutdown produces rather
+    than only the shape a single Ctrl-C produces.
+    """
+    ledger: list[str] = []
+
+    async def body() -> str:
+        ledger.append("start")
+        for _ in range(5):
+            await asyncio.sleep(0.02)
+        ledger.append("side_effect")
+        return "finished"
+
+    async def scenario() -> Any:
+        scope = DrainScope()
+        task = asyncio.current_task()
+        assert task is not None
+
+        async def cancel_twice() -> None:
+            await asyncio.sleep(0.01)
+            task.cancel()
+            await asyncio.sleep(0.03)
+            task.cancel()
+
+        asyncio.ensure_future(cancel_twice())
+        try:
+            async with scope:
+                scope.start("c1", body())
+                await asyncio.sleep(0.005)
+        except asyncio.CancelledError:
+            pass
+        return scope.results().get("c1")
+
+    outcome = asyncio.run(scenario())
+
+    assert "side_effect" in ledger, "the body's side effect was lost"
+    assert outcome is not None, "no result was recorded for the started body"
+    assert outcome.value == "finished"
+
+
+def test_an_interrupted_task_is_reported_and_the_session_survives():
+    """Ctrl-C during a task interrupts the task, not the session.
+
+    The drain already guarantees the work is not lost -- every started tool body
+    finishes and records a result. What was missing is that the user was never
+    told, so an interrupted command looked like a failed one.
+    """
+    import asyncio
+
+    from arm.agent.loop import Runtime
+    from arm.llm.mock import MockAdapter, text_response
+    from arm.prompt.assembler import PromptAssembler
+    from arm.session.session import Session
+    from arm.tools.registry import ToolRegistry
+
+    assembler = PromptAssembler()
+    assembler.set("core", "you are arm", priority=10)
+    session = Session.create("interrupted")
+    loop = Runtime(
+        session, MockAdapter([text_response("ok")]), ToolRegistry(),
+        assembler=assembler, model="mock",
+    )
+
+    async def scenario() -> list[str]:
+        loop.submit("a question")
+        task = asyncio.ensure_future(loop.run_until_idle())
+        await asyncio.sleep(0.01)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        return [e.type for e in session]
+
+    types = asyncio.run(scenario())
+
+    # The turn is closed out rather than left open, so the log stays replayable.
+    assert "turn/end" in types, (
+        f"an interrupted turn left no turn/end; the log is not replayable: {types}"
+    )

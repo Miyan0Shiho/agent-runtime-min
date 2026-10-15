@@ -720,7 +720,15 @@ async def _chat_loop(
             # The per-task timer is omitted here: the session-wide timer above
             # already covers this task, and two timers would race on the same
             # tasks.
-            await _run_task(runtime, session, line, verbose=True)
+            #
+            # Ctrl-C during a task interrupts *the task*, not the session. The
+            # drain inside the pipeline still finishes every tool body it started
+            # and records a result, so the work is not lost -- but the user needs
+            # to be told that, or an interrupted command looks like a failed one.
+            try:
+                await _run_task(runtime, session, line, verbose=True)
+            except KeyboardInterrupt:
+                print("\n[interrupted -- started tool calls were finished and recorded]")
             print()
     finally:
         if timer is not None:
