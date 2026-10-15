@@ -3,8 +3,8 @@
 > ## 🚀 实施入口
 > **[REQUIREMENTS.md](REQUIREMENTS.md) —— 需求书,自包含。** 换干净对话做实现时,先读这份,再按其中的索引读细节。
 >
-> **状态:L4 · 内核主干 + T3 全部 + MCP + hooks + 插件系统完成** · 立项 2026-10-07 · 设计完成 2026-10-12 · 实现 2026-10-12
-> **代码:22,468 行实现 / 16,940 行测试 / 1,001 个测试通过 / 62 个模块** · `make bench` 全绿
+> **状态:L4 · 内核主干 + T3 全部 + MCP + hooks + 插件系统完成 · 已纳入 git** · 立项 2026-10-07 · 设计完成 2026-10-12 · 实现 2026-10-12
+> **代码:23,180 行实现 / 17,676 行测试 / 1,026 个测试通过 / 62 个模块** · `make bench` 全绿
 > 决策链:[ADR-0001](docs/decisions/0001-scope-and-non-goals.md)(范围/clean-room)→ [ADR-0002](docs/decisions/0002-design-alignment-and-native-builtins.md)(设计对齐)→ [ADR-0003](docs/decisions/0003-usable-harness-and-t3-scope.md)(可自用 + 全做 + 顺序护栏)
 > 设计产物:主链路 1 份 + 机制契约 4 份(**78 条不变量**)+ 决策记录 3 份 + 参考 2 份
 > 实施产物:**内核主干 M1–M4 全部实现** + [契约修正记录](docs/contract-amendments.md) + [前置验证](spikes/)
@@ -229,8 +229,8 @@ agent-runtime-min/
     decisions/                   ADR-0001 / 0002 / 0003
     market-native-builtins.md    DSH 插件市场实测(4,508 插件 / 23 分类)
     t3-ordering-and-guardrails.md T3 顺序(依赖拓扑)+ 执行护栏
-  src/arm/                                    实现(62 个模块 / 22,468 行)
-  tests/                                      1,001 个测试 / 16,940 行
+  src/arm/                                    实现(62 个模块 / 23,180 行)
+  tests/                                      1,026 个测试 / 17,676 行
   spikes/                                     前置验证与对抗性审查(Q1 取消语义 / Q2 schema / Q3 瀑布)
   Makefile                                    make bench = 测试 + 四项验收指标
 ```
