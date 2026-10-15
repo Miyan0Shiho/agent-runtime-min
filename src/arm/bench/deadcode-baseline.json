@@ -15,7 +15,6 @@
   "src/arm/eval/judge.py::Judgement.length_chars": "known dead: no caller in src/ or tests/; remove or wire it",
   "src/arm/goal/store.py::GoalStore.arm": "referenced only by name (a common word); needs reading",
   "src/arm/goal/tools.py::GetGoalParams": "known dead: no caller in src/ or tests/; remove or wire it",
-  "src/arm/hooks/runner.py::HookRunner.fire_parallel": "known dead: no caller in src/ or tests/; remove or wire it",
   "src/arm/kernel/container.py::Container.has": "referenced only by name (a common word); needs reading",
   "src/arm/kernel/container.py::Container.on_dispose": "known dead: no caller in src/ or tests/; remove or wire it",
   "src/arm/kernel/container.py::Container.provide": "referenced only by name (a common word); needs reading",

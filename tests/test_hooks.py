@@ -32,6 +32,7 @@ from arm.hooks.protocol import (
     DECISION_DENY,
     DIALECT_CLAUDE,
     DIALECT_CODEX,
+    POINT_AGENT_CREATED,
     POINT_PRE_STEP,
     POINT_PRE_TOOL,
     POINT_TURN_STOPPING,
@@ -1021,3 +1022,161 @@ def test_a_failing_stop_hook_does_not_break_the_turn():
     outcomes = _run_turn(bridge)
     assert outcomes[0].reason == "completed"
     assert outcomes[0].steps == 1
+
+
+# ===========================================================================
+# SessionStart must actually fire
+# ===========================================================================
+
+
+def test_the_bridge_fires_session_start_hooks(tmp_path: Path):
+    """`SessionStart` is the hook point people reach for first.
+
+    It was mapped, loaded and never consulted, so installing one produced silence
+    -- indistinguishable from a hook that ran and decided nothing.
+    """
+    marker = tmp_path / "ran.txt"
+    command, args = script(
+        tmp_path,
+        f"""
+        import json, pathlib, sys
+        json.load(sys.stdin)
+        pathlib.Path({str(marker)!r}).write_text("fired")
+        print(json.dumps({{"additionalContext": "remember the style guide"}}))
+        """,
+    )
+    bridge = HookBridge(
+        HookRunner(
+            [
+                HookHandler(
+                    point=POINT_AGENT_CREATED, command=command, args=tuple(args)
+                )
+            ]
+        )
+    )
+
+    context = asyncio.run(bridge.agent_created("sess-1"))
+
+    assert marker.exists(), "the SessionStart hook did not run"
+    assert context == ("remember the style guide",), context
+
+
+def test_session_start_context_reaches_the_session(tmp_path: Path, monkeypatch):
+    """End to end: a configured hook's context lands in the log."""
+    import json as jsonlib
+
+    from arm.cli.main import build_runtime
+
+    hook = tmp_path / "start.py"
+    hook.write_text(
+        "import json, sys\n"
+        "json.load(sys.stdin)\n"
+        "print(json.dumps({'additionalContext': 'from the session-start hook'}))\n"
+    )
+    (tmp_path / "hooks.json").write_text(
+        jsonlib.dumps(
+            {
+                "hooks": {
+                    "SessionStart": [
+                        {
+                            "hooks": [
+                                {
+                                    "type": "command",
+                                    "command": sys.executable,
+                                    "args": [str(hook)],
+                                }
+                            ]
+                        }
+                    ]
+                }
+            }
+        )
+    )
+
+    # Imported by path: `tests/` is not a package on sys.path in every runner,
+    # and this helper is the project's one real HTTP model server.
+    sys.path.insert(0, str(Path(__file__).parent))
+    from test_end_to_end import FakeServer
+
+    with FakeServer([{"text": "ok"}]) as server:
+        runtime, session, handle, _scheduler, _mcp = build_runtime(
+            session_id="hooked",
+            model="m",
+            api_key="k",
+            base_url=server.base_url,
+            home=str(tmp_path),
+        )
+        assert handle is not None
+        handle.close()
+
+    notes = [
+        e for e in session if e.data.get("source") == "hook:session-start"
+    ]
+    assert notes, "the hook's context never reached the session"
+    text = notes[0].data["message"]["content"][0]["text"]
+    assert "from the session-start hook" in text
+
+
+def test_session_start_context_is_not_user_input(tmp_path: Path):
+    """It is context, not a message: the inbox must not claim it.
+
+    A claimed message would make the first turn run twice -- once for the user's
+    question and once for the hook's note.
+    """
+    import json as jsonlib
+
+    from arm.cli.main import build_runtime
+
+    hook = tmp_path / "start.py"
+    hook.write_text(
+        "import json, sys\n"
+        "json.load(sys.stdin)\n"
+        "print(json.dumps({'additionalContext': 'a note'}))\n"
+    )
+    (tmp_path / "hooks.json").write_text(
+        jsonlib.dumps(
+            {
+                "hooks": {
+                    "SessionStart": [
+                        {"hooks": [{"type": "command", "command": sys.executable, "args": [str(hook)]}]}
+                    ]
+                }
+            }
+        )
+    )
+
+    # Imported by path: `tests/` is not a package on sys.path in every runner,
+    # and this helper is the project's one real HTTP model server.
+    sys.path.insert(0, str(Path(__file__).parent))
+    from test_end_to_end import FakeServer
+
+    with FakeServer([{"text": "ok"}]) as server:
+        runtime, session, handle, _scheduler, _mcp = build_runtime(
+            session_id="hooked",
+            model="m",
+            api_key="k",
+            base_url=server.base_url,
+            home=str(tmp_path),
+        )
+        assert handle is not None
+        handle.close()
+
+    for event in session:
+        if event.data.get("source") == "hook:session-start":
+            assert event.data.get("context_only") is True, (
+                "the hook's context would be claimed as user input"
+            )
+
+
+def test_a_failing_session_start_hook_does_not_prevent_startup(tmp_path: Path):
+    """A hook fault is not a startup fault."""
+    bridge = HookBridge(
+        HookRunner(
+            [
+                HookHandler(
+                    point=POINT_AGENT_CREATED, command="/nonexistent/not-a-command"
+                )
+            ]
+        )
+    )
+    assert asyncio.run(bridge.agent_created("sess")) == ()

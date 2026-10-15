@@ -487,6 +487,25 @@ def build_runtime(
             print(f"warning: hooks: {note}", file=sys.stderr)
         if hook_handlers:
             hook_bridge = HookBridge(HookRunner(hook_handlers))
+            # Session-start hooks fire once, here, before the first turn. The
+            # point was mapped and loaded but never consulted, so a SessionStart
+            # hook -- the one people reach for first -- silently did nothing.
+            context = asyncio.run(hook_bridge.agent_created(session.session_id))
+            for note in context:
+                session.append(
+                    USER_MESSAGE,
+                    {
+                        "message": {
+                            "role": "user",
+                            "content": [{"type": "text", "text": note}],
+                        },
+                        "surface_op": "append",
+                        "source": "hook:session-start",
+                        # Context, not input: the inbox must not claim it, or the
+                        # first turn would run twice.
+                        "context_only": True,
+                    },
+                )
 
     # MCP servers are configured in a file rather than on the command line: a
     # server definition is a command line and an environment, which is not

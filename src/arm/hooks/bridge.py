@@ -30,6 +30,7 @@ from dataclasses import dataclass
 from typing import Any, Mapping
 
 from .protocol import (
+    POINT_AGENT_CREATED,
     DECISION_ASK,
     DECISION_DENY,
     POINT_POST_TOOL,
@@ -96,6 +97,36 @@ class HookBridge:
                 "is_error": is_error,
             },
         )
+
+    async def agent_created(self, session_id: str) -> tuple[str, ...]:
+        """Fire the observing hooks for a new session.
+
+        This is `SessionStart` in the Claude Code dialect -- the hook point people
+        reach for first, and the one that was mapped, loaded, and never fired. A
+        user who installed one got silence, which is indistinguishable from a hook
+        that ran and decided nothing.
+
+        The point is **observing**: it runs the hooks and returns any context they
+        contributed, but a decision it makes cannot change what happens, because
+        there is nothing yet to change. That is stated rather than pretended --
+        `fire_parallel` reports decisions instead of applying them.
+        """
+        if not self.enabled:
+            return ()
+        try:
+            _decision, outcomes = await self.runner.fire_parallel(
+                POINT_AGENT_CREATED,
+                session_id,
+                {"point": POINT_AGENT_CREATED, "session": session_id},
+            )
+        except Exception as exc:  # noqa: BLE001 - a hook fault is not a start fault
+            log.warning("the session-start hook failed: %s", exc)
+            return ()
+
+        context: list[str] = []
+        for outcome in outcomes:
+            context.extend(outcome.decision.context)
+        return tuple(context)
 
     async def pre_step(self, text: str) -> Decision:
         """Decide whether a user's message may be processed."""
