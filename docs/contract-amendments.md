@@ -113,7 +113,7 @@
 |---|---|---|
 | 1 | 19 个事件是否够跑通真实任务 | ✅ **已测**（`make claims`）：11 个阶段全覆盖，实际 28 个类型，无类型主导 |
 | 2 | 裸 JSONL 在数万事件下的 flush 开销 | ✅ **已测**：实时追加 0.090 ms/事件，fsync 0.03 ms，恢复线性 0.022 ms/事件 |
-| 3 | M2 的 headroom 默认值设为 0 后的行为 | M2 尚未实现 |
+| 3 | M2 的 headroom 默认值设为 0 后的行为 | ✅ **已测**：`headroom=0` 时 `pressure_budget == message_budget`（900=900），即**不保留任何余量**；headroom=200 时为 700，500 时为 400。语义正确 |
 | 4 | pydantic schema 在真实模型上的接受率 | 仅做了本地形状验证与归一化；未跑真实 API |
 | 5 | `uncancel()` 语义 | ✅ **已测**：连发 3 次 cancel，drain 全部吸收，body 跑完并记录结果 |
 | 6 | 信号触发的取消、Runner shutdown 取消 | ✅ **已测**（见下）：`KeyboardInterrupt` 下 drain 仍让 body 跑完 |
