@@ -1132,11 +1132,7 @@ class Runtime:
                     call_id=outcome.call_id, name=outcome.name
                 ).to_record(),
                 is_error=outcome.result.is_error,
-                info=(
-                    {"code": outcome.result.error_code}
-                    if outcome.result.error_code
-                    else None
-                ),
+                info=_result_info(outcome),
             )
 
         # Spill oversized results the moment they land, before the next request
@@ -1165,6 +1161,24 @@ class _StepOutcome:
     #: completion -- the two need different handling, and only the provider knows
     #: which happened.
     finish_reason: str = ""
+
+
+def _result_info(outcome: Any) -> dict[str, Any] | None:
+    """Extra facts about a tool result, for the log.
+
+    Recorded separately from the message because these are about *how the call
+    went* rather than what it said: the error code and how long it took. Both
+    were measured and neither reached the log, so "what was slow" and "what
+    failed and why" were unanswerable from a transcript.
+    """
+    info: dict[str, Any] = {}
+    code = getattr(outcome.result, "error_code", None)
+    if code:
+        info["code"] = code
+    duration = getattr(outcome, "duration_ms", 0.0)
+    if duration:
+        info["duration_ms"] = round(duration, 3)
+    return info or None
 
 
 def _usage_record(usage: Usage | None) -> dict[str, Any]:

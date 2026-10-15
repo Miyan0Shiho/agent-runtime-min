@@ -395,3 +395,53 @@ def test_context_management_can_be_disabled():
     asyncio.run(runtime.run_until_idle())
 
     assert session.surface.replacements == []
+
+
+def test_spilling_preserves_the_result_s_metadata(tmp_path):
+    """A rewrite may change the content and nothing else.
+
+    The spill rebuilds a tool/result with a locator in place of the bytes. My
+    first version dropped the sibling ``info`` field while doing so, and the
+    surface guard rejected it: a rewrite that alters anything but the content is
+    exactly what the invariant forbids.
+
+    The guard caught it, which is the point of enforcing the invariant rather
+    than documenting it -- and the metadata it protects is not decoration. It
+    carries the error code and the duration, which describe how the call went
+    rather than what it said.
+    """
+    runtime, session, _ = build_runtime(
+        [
+            tool_response(("c1", "big", {"size": 40_000})),
+            text_response("done"),
+        ],
+        tools=[big_tool()],
+    )
+    runtime.context = ContextManager(
+        session,
+        thresholds=Thresholds(context_window=60_000, headroom=0, threshold_ratio=0.8),
+        summarize=None,
+        spill=SpillStore(tmp_path / "spill"),
+        spill_threshold=10_000,
+        pruner=Pruner(head_chars=200, tail_chars=100),
+    )
+
+    runtime.submit("call the big tool")
+    asyncio.run(runtime.run_until_idle())
+
+    results = [e for e in session if e.type == "tool/result"]
+    assert results, "no tool result was recorded"
+
+    # The result was actually spilled, so the rewrite path ran rather than being
+    # skipped -- otherwise this test would pass without exercising anything.
+    final = results[-1]
+    content = final.data["message"]["content"][0]["text"]
+    assert "locator" in content, (
+        f"the result was not spilled, so the rewrite never ran: {content[:120]}"
+    )
+
+    # And the metadata survived the rewrite.
+    info = final.data.get("info") or {}
+    assert "duration_ms" in info, (
+        f"the spill dropped the result's metadata: {final.data}"
+    )

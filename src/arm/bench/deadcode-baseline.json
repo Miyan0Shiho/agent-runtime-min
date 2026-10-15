@@ -35,7 +35,6 @@
   "src/arm/tools/drain.py::DrainScope.was_started": "known dead: no caller in src/ or tests/; remove or wire it",
   "src/arm/tools/pipeline.py::AbortSignal.fused_with": "known dead: no caller in src/ or tests/; remove or wire it",
   "src/arm/tools/pipeline.py::AbortSignal.raise_if_aborted": "known dead: no caller in src/ or tests/; remove or wire it",
-  "src/arm/tools/pipeline.py::Execution.elapsed_ms": "known dead: no caller in src/ or tests/; remove or wire it",
   "src/arm/tools/registry.py::ToolRegistry.pop_layer": "known dead: no caller in src/ or tests/; remove or wire it",
   "src/arm/tools/registry.py::ToolRegistry.register_definition": "known dead: no caller in src/ or tests/; remove or wire it",
   "src/arm/workspace/tools.py::WorktreePathParams": "known dead: no caller in src/ or tests/; remove or wire it",

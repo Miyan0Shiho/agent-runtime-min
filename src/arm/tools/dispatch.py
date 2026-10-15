@@ -55,6 +55,10 @@ class CallOutcome:
     #: Whether the body actually started. Distinguishes "ran and failed" from
     #: "never ran because we were cancelled".
     started: bool
+    #: How long the body took, in milliseconds. Recorded so the log answers
+    #: "what was slow" -- the pipeline measured it and then dropped it, which is
+    #: the same shape of gap as the provider's token counts.
+    duration_ms: float = 0.0
 
 
 @dataclass
@@ -217,4 +221,5 @@ class Dispatcher:
             result=result,
             index=index,
             started=execution.started,
+            duration_ms=execution.elapsed_ms,
         )

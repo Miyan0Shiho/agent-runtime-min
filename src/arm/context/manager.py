@@ -197,6 +197,13 @@ class ContextManager:
                     "content": [{"type": "text", "text": replacement}],
                 },
                 is_error=bool(event.data.get("is_error", False)),
+                # The sibling fields are carried over unchanged. A rewrite may
+                # only alter the message content, so dropping `info` here is not
+                # a permitted simplification -- it is a rewrite of something the
+                # invariant forbids touching, and the guard says so. It would
+                # also lose the duration and error code, which describe how the
+                # call went rather than what it said.
+                info=dict(event.data.get("info") or {}) or None,
                 replace={"op": "replace", "start_seq": seq, "end_seq": seq},
                 source_event_seqs=[seq],
             )

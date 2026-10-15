@@ -741,3 +741,38 @@ def test_a_normal_answer_is_still_reported_as_completed():
         outcomes = asyncio.run(runtime.run_until_idle())
 
     assert outcomes[0].reason == "completed"
+
+
+def test_a_tool_result_records_how_long_it_took():
+    """The pipeline measured the duration and then dropped it.
+
+    Same shape of gap as the provider's token counts: the value was computed on
+    the mandatory path and never reached the log, so "what was slow" was
+    unanswerable from a transcript.
+    """
+    with FakeServer(
+        [{"tool": ("read", {"path": "pyproject.toml"})}, {"text": "ok"}]
+    ) as server:
+        runtime, session = build_runtime(server.base_url)
+        runtime.submit("read it")
+        asyncio.run(runtime.run_until_idle())
+
+    result = next(e for e in session if e.type == "tool/result")
+    info = result.data.get("info") or {}
+    assert "duration_ms" in info, f"no duration was recorded: {result.data}"
+    assert info["duration_ms"] >= 0
+
+
+def test_a_failed_tool_records_both_its_code_and_its_duration():
+    """A failure needs both: what went wrong, and how long it took to go wrong."""
+    with FakeServer(
+        [{"tool": ("read", {"path": "/definitely/not/a/real/file"})}, {"text": "ok"}]
+    ) as server:
+        runtime, session = build_runtime(server.base_url)
+        runtime.submit("read it")
+        asyncio.run(runtime.run_until_idle())
+
+    result = next(e for e in session if e.type == "tool/result")
+    assert result.data["is_error"] is True
+    info = result.data.get("info") or {}
+    assert "duration_ms" in info, info
