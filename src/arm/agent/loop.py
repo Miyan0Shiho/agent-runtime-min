@@ -159,6 +159,7 @@ class Runtime:
         approval: "ApprovalService | None" = None,
         sandbox: "SandboxPolicy | None" = None,
         scheduler: Any = None,
+        subagents: Any = None,
         hook_bridge: Any = None,
         model: str = "",
         max_steps: int = 64,
@@ -229,6 +230,10 @@ class Runtime:
         # driving one -- a scheduler inside the loop would have to reach back out
         # for the state it is in the middle of mutating.
         self.scheduler = scheduler
+        # Held so ``shutdown`` can stop children that were started and never
+        # finished. A subagent started through ``start`` and abandoned by its
+        # caller would otherwise keep running with nothing left to stop it.
+        self.subagents = subagents
 
         self.phase = PHASE_IDLE
         self._announced = ToolAnnouncement()
@@ -653,6 +658,30 @@ class Runtime:
             steps=steps,
             continue_loop=False,
         )
+
+    async def shutdown(self) -> list[str]:
+        """Stop everything this runtime started.
+
+        Called when a session ends. Without it, a subagent that was started and
+        whose caller never awaited it keeps running -- and the process exits with
+        it still holding whatever it holds.
+
+        Returns the names of children that would not settle, so a caller can
+        report them rather than assume a clean exit.
+        """
+        orphans: list[str] = []
+        if self.subagents is not None:
+            try:
+                orphans = await self.subagents.shutdown()
+            except Exception as exc:  # noqa: BLE001 - shutdown must not raise
+                log.warning("shutting down subagents failed: %s", exc)
+                orphans = ["<subagent shutdown failed>"]
+        if self.scheduler is not None:
+            try:
+                self.scheduler.store._flush()
+            except Exception as exc:  # noqa: BLE001
+                log.warning("flushing the schedule failed: %s", exc)
+        return orphans
 
     def _fire_due_reminders(self) -> None:
         """Deliver any reminder whose time has arrived.

@@ -694,9 +694,14 @@ def make_tools():
     return tools, store
 
 
-def test_the_three_schedule_tools_exist():
+def test_the_schedule_tools_exist():
     tools, _store = make_tools()
-    assert sorted(tools) == ["schedule_cancel", "schedule_create", "schedule_list"]
+    assert sorted(tools) == [
+        "schedule_cancel",
+        "schedule_create",
+        "schedule_history",
+        "schedule_list",
+    ]
 
 
 def test_creating_an_after_reminder():
@@ -1525,3 +1530,73 @@ def test_a_reminder_fires_while_the_chat_loop_is_idle():
     assert delivered, (
         "the reminder did not fire while the chat loop was idle at the prompt"
     )
+
+
+def test_history_reports_deliveries():
+    """A receipt is readable, or it is not a record of anything.
+
+    It says the reminder reached the inbox -- not that the model read it. That
+    limit is stated in the tool description rather than left for the caller to
+    guess.
+    """
+    import asyncio
+
+    from arm.schedule.runtime import DeliveryReceipt
+
+    tools, store = make_tools()
+    store.record_delivery(
+        DeliveryReceipt(
+            schedule_id="sch-1",
+            session_id="sess-1",
+            delivered_at=NOW.isoformat(),
+            occurrence_at=NOW.isoformat(),
+            message_id="m1",
+        )
+    )
+
+    result = asyncio.run(invoke(tools["schedule_history"], {}))
+    assert not result.is_error
+    assert "sch-1" in result.content
+    assert result.value["count"] == 1
+
+
+def test_history_is_empty_before_anything_is_delivered():
+    import asyncio
+
+    tools, _store = make_tools()
+    result = asyncio.run(invoke(tools["schedule_history"], {}))
+    assert not result.is_error
+    assert "No reminders have been delivered" in result.content
+
+
+def test_history_honours_a_limit():
+    """``limit=0`` must return nothing rather than everything."""
+    import asyncio
+
+    from arm.schedule.runtime import DeliveryReceipt
+
+    tools, store = make_tools()
+    for index in range(5):
+        store.record_delivery(
+            DeliveryReceipt(
+                schedule_id="sch-1",
+                session_id="sess-1",
+                delivered_at=NOW.isoformat(),
+                occurrence_at=NOW.isoformat(),
+                message_id=f"m{index}",
+            )
+        )
+
+    assert asyncio.run(invoke(tools["schedule_history"], {"limit": 2})).value["count"] == 2
+    assert asyncio.run(invoke(tools["schedule_history"], {"limit": 0})).value["count"] == 0
+
+
+def test_the_history_tool_does_not_claim_the_model_acted():
+    """The description must state the limit of what a receipt proves."""
+    import json
+
+    tools, _store = make_tools()
+    rendered = json.dumps(dict(tools["schedule_history"].definition.parameters))
+    description = tools["schedule_history"].definition.description
+    assert "does not mean" in description
+    assert "reached" in description

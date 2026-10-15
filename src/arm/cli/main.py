@@ -534,6 +534,7 @@ def build_runtime(
         approval=approval,
         sandbox=sandbox,
         scheduler=scheduler,
+        subagents=subagents,
         hook_bridge=hook_bridge,
         model=model,
     )
@@ -628,6 +629,11 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         # uncovered, and the reminder would wait for the next unrelated task.
         asyncio.run(_chat_loop(runtime, session, scheduler, args))
     finally:
+        # Children are stopped before the log is closed: a subagent still writing
+        # to a closed handle would fail in a way nobody could attribute.
+        orphans = asyncio.run(runtime.shutdown())
+        if orphans:
+            print(f"warning: {len(orphans)} subagent(s) did not stop", file=sys.stderr)
         if handle is not None:
             handle.close()
     return 0

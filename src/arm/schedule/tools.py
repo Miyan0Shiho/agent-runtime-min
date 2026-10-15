@@ -104,7 +104,7 @@ class ScheduleTools:
         self.session_id = session_id
 
     def tools(self) -> list[RegisteredTool]:
-        return [self._create(), self._list(), self._cancel()]
+        return [self._create(), self._list(), self._cancel(), self._history()]
 
     def _create(self) -> RegisteredTool:
         async def body(arguments: Mapping[str, Any], _execution: Any) -> ToolResult:
@@ -257,6 +257,44 @@ class ScheduleTools:
             body=body,
         )
 
+    def _history(self) -> RegisteredTool:
+        async def body(arguments: Mapping[str, Any], _execution: Any) -> ToolResult:
+            limit = int(arguments.get("limit", 20))
+            receipts = self.store.history(limit=limit)
+            if not receipts:
+                return ToolResult.ok(
+                    "No reminders have been delivered yet.",
+                    value={"count": 0},
+                )
+            lines = ["Recent reminder deliveries (newest first):"]
+            for receipt in receipts:
+                title = ""
+                task = self.store.get(receipt.schedule_id)
+                if task is not None:
+                    title = task.title
+                lines.append(
+                    f"  {receipt.delivered_at} {receipt.schedule_id} "
+                    f"{title or '(deleted)'}"
+                )
+            return ToolResult.ok(
+                "\n".join(lines), value={"count": len(receipts)}
+            )
+
+        return RegisteredTool(
+            definition=ToolDefinition(
+                name="schedule_history",
+                description=(
+                    "Show when reminders were actually delivered. A receipt means "
+                    "the reminder reached this session's inbox -- it does not mean "
+                    "the model read it or acted on it."
+                ),
+                parameters=ScheduleHistoryParams.model_json_schema(),
+                concurrency_safe=lambda _args: True,
+            ),
+            body=body,
+            validator=ScheduleHistoryParams,
+        )
+
     def _cancel(self) -> RegisteredTool:
         async def body(arguments: Mapping[str, Any], _execution: Any) -> ToolResult:
             schedule_id = str(arguments.get("id", "")).strip()
@@ -285,6 +323,12 @@ class ScheduleTools:
             body=body,
             validator=ScheduleCancelParams,
         )
+
+
+class ScheduleHistoryParams(BaseModel):
+    limit: int = Field(
+        default=20, description="How many recent deliveries to show."
+    )
 
 
 def _with_scheduled_at(record: ScheduleRecord, when: str) -> ScheduleRecord:
