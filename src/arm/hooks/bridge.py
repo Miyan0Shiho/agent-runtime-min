@@ -136,6 +136,43 @@ class HookBridge:
             POINT_PRE_STEP, "", {"point": POINT_PRE_STEP, "text": text}
         )
 
+    async def pre_step_decision(self, text: str) -> Any:
+        """Adapt a hook's pre-step decision to the loop's ``StepDecision``.
+
+        This is `UserPromptSubmit`. A hook that denies here rejects the user's
+        message before any model call happens -- the point of the hook is to
+        refuse work, so the refusal has to short-circuit rather than be recorded.
+
+        The adapter lives here rather than in the loop so the loop stays ignorant
+        of hooks: it asks a narrow question ("may this step run?") and this module
+        answers it in the vocabulary the loop already uses.
+        """
+        from ..agent.loop import StepDecision
+
+        if not self.enabled:
+            return StepDecision.enter()
+
+        decision = await self.runner.fire(
+            POINT_PRE_STEP, "", {"point": POINT_PRE_STEP, "text": text}
+        )
+        if decision.kind == DECISION_DENY:
+            return StepDecision.reject(decision.reason or "a hook rejected this message")
+        return StepDecision.enter()
+
+    async def post_tool_decision(
+        self, tool_name: str, arguments: Mapping[str, Any], result: str,
+        *, is_error: bool,
+    ) -> Decision:
+        """Run the post-tool hooks.
+
+        This is `PostToolUse`. The tool has already run, so a denial here means
+        "the result is unacceptable" rather than "do not run it" -- the loop
+        turns it into a block with the hook's feedback, not a refusal to execute.
+        """
+        return await self.post_tool(
+            tool_name, arguments, result, is_error=is_error
+        )
+
     async def turn_stopping(self, reason: str, steps: int) -> Decision:
         """Ask whether the turn should stop.
 

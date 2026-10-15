@@ -33,6 +33,7 @@ from arm.hooks.protocol import (
     DIALECT_CLAUDE,
     DIALECT_CODEX,
     POINT_AGENT_CREATED,
+    POINT_POST_TOOL,
     POINT_PRE_STEP,
     POINT_PRE_TOOL,
     POINT_TURN_STOPPING,
@@ -778,7 +779,7 @@ def test_a_hook_blocks_a_real_tool_call_through_the_pipeline(tmp_path: Path):
     project -- correct code that nothing calls.
     """
     from arm.agent.loop import Runtime
-    from arm.llm.mock import MockAdapter
+    from arm.llm.mock import MockAdapter, text_response, tool_response
     from arm.prompt.assembler import PromptAssembler
     from arm.session.session import Session
     from arm.tools.builtin import builtin_tools
@@ -1180,3 +1181,169 @@ def test_a_failing_session_start_hook_does_not_prevent_startup(tmp_path: Path):
         )
     )
     assert asyncio.run(bridge.agent_created("sess")) == ()
+
+
+# ===========================================================================
+# Every hook point must actually fire
+# ===========================================================================
+
+
+def _marker_hook(tmp_path: Path, point: str, *, decision: str = "allow"):
+    """A hook that records that it ran, and optionally decides."""
+    marker = tmp_path / f"{point.replace('/', '_')}.txt"
+    command, args = script(
+        tmp_path,
+        f"""
+        import json, pathlib, sys
+        json.load(sys.stdin)
+        pathlib.Path({str(marker)!r}).write_text("fired")
+        print(json.dumps({{"decision": {decision!r}}}))
+        """,
+        name=f"hook_{point.replace('/', '_')}.py",
+    )
+    return marker, HookBridge(
+        HookRunner(
+            [HookHandler(point=point, command=command, args=tuple(args))]
+        )
+    )
+
+
+def _run_with_bridge(bridge, script_, *, tmp_path: Path):
+    """Run one turn through a real loop with the given bridge."""
+    from arm.agent.loop import Runtime
+    from arm.llm.mock import MockAdapter
+    from arm.prompt.assembler import PromptAssembler
+    from arm.session.session import Session
+    from arm.tools.builtin import builtin_tools
+    from arm.tools.registry import ToolRegistry
+
+    registry = ToolRegistry()
+    registry.register_many(builtin_tools())
+    assembler = PromptAssembler()
+    assembler.set("core", "you are arm", priority=10)
+    session = Session.create("hooks")
+    loop = Runtime(
+        session,
+        MockAdapter(script_),
+        registry,
+        assembler=assembler,
+        hook_bridge=bridge,
+        model="mock",
+    )
+    loop.submit("go")
+    outcomes = asyncio.run(loop.run_until_idle())
+    return session, outcomes
+
+
+def test_user_prompt_submit_fires(tmp_path: Path):
+    """`UserPromptSubmit` was mapped, loaded, and never called.
+
+    A hook that refuses work silently permitted it -- the failure mode is
+    indistinguishable from a hook that ran and approved.
+    """
+    from arm.llm.mock import text_response
+
+    marker, bridge = _marker_hook(tmp_path, POINT_PRE_STEP)
+    _run_with_bridge(bridge, [text_response("ok")], tmp_path=tmp_path)
+
+    assert marker.exists(), "UserPromptSubmit never fired"
+
+
+def test_user_prompt_submit_can_reject_the_message(tmp_path: Path):
+    """A denial must short-circuit before the model is called."""
+    from arm.llm.mock import text_response
+
+    marker, bridge = _marker_hook(tmp_path, POINT_PRE_STEP, decision="deny")
+    session, outcomes = _run_with_bridge(
+        bridge, [text_response("should not happen")], tmp_path=tmp_path
+    )
+
+    assert marker.exists()
+    assert outcomes[0].reason == "blocked", (
+        f"a rejected message still ran the turn: {outcomes[0].reason}"
+    )
+    # No step means no model call, so no assistant message exists.
+    assert not [e for e in session if e.type == "assistant/message"], (
+        "the model was called despite the rejection"
+    )
+
+
+def test_post_tool_use_fires(tmp_path: Path):
+    """`PostToolUse` was mapped, loaded, and never called either."""
+    from arm.llm.mock import text_response, tool_response
+
+    marker, bridge = _marker_hook(tmp_path, POINT_POST_TOOL)
+    _run_with_bridge(
+        bridge,
+        [tool_response(("c1", "read", {"path": "pyproject.toml"})), text_response("ok")],
+        tmp_path=tmp_path,
+    )
+
+    assert marker.exists(), "PostToolUse never fired"
+
+
+def test_post_tool_use_can_block_a_result(tmp_path: Path):
+    """The tool already ran, so a denial replaces the result rather than stopping it."""
+    from arm.llm.mock import text_response, tool_response
+
+    _marker, bridge = _marker_hook(tmp_path, POINT_POST_TOOL, decision="deny")
+    session, _outcomes = _run_with_bridge(
+        bridge,
+        [tool_response(("c1", "read", {"path": "pyproject.toml"})), text_response("ok")],
+        tmp_path=tmp_path,
+    )
+
+    results = [e for e in session if e.type == "tool/result"]
+    assert results, "no tool result was recorded"
+    assert any(e.data.get("is_error") for e in results), (
+        "the hook denied the result and it was accepted anyway"
+    )
+
+
+def test_every_hook_point_is_consulted_somewhere():
+    """Every point must be referenced outside its own definition.
+
+    Three of the five points were mapped and loaded but never called, so a user
+    installing a hook got silence.
+
+    **What this catches and what it does not**, stated because I checked: it
+    catches a point that no code mentions at all, which is how a point gets
+    forgotten while being added. It does **not** catch a point whose bridge
+    method exists but is never called from the loop -- I verified that by
+    removing the post-tool wiring, and this check still passed while the
+    behavioural test above failed. The per-point behaviour tests are what cover
+    that, and this is a cheap first line rather than the whole guard.
+    """
+    from pathlib import Path
+
+    import arm.hooks.protocol as protocol
+
+    # Each point has a module-level constant. The check looks for the *constant*
+    # rather than the literal string, because that is how the code refers to a
+    # point -- grepping for the string reports every point as unwired, which is a
+    # false alarm rather than a finding.
+    constants = {
+        name: value
+        for name, value in vars(protocol).items()
+        if name.startswith("POINT_") and isinstance(value, str)
+    }
+    assert len(constants) == len(protocol.POINTS), (
+        "a hook point has no POINT_ constant, so nothing can refer to it"
+    )
+
+    root = Path("src/arm")
+    missing: list[str] = []
+    for name, point in sorted(constants.items()):
+        references = [
+            path
+            for path in root.rglob("*.py")
+            if path.name != "protocol.py"
+            and name in path.read_text(encoding="utf-8")
+        ]
+        if not references:
+            missing.append(f"{point} ({name})")
+
+    assert not missing, (
+        "these hook points are defined but never consulted, so a hook installed "
+        f"for them would silently do nothing: {missing}"
+    )

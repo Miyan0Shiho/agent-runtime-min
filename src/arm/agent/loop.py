@@ -525,6 +525,37 @@ class Runtime:
             )
 
         # -- pre-step: may reject the entire batch ----------------------
+        #
+        # The external hook bridge is consulted here, which is what makes
+        # `UserPromptSubmit` fire. It was mapped and loaded and never called, so
+        # a hook that refuses work silently permitted it.
+        if self.hook_bridge is not None and self.hooks.pre_step is None:
+            try:
+                # The text that started the turn, which is what a
+                # UserPromptSubmit hook inspects.
+                decision = await self.hook_bridge.pre_step_decision(
+                    claim.turn.text if claim.turn is not None else ""
+                )
+            except Exception as exc:  # noqa: BLE001 - a broken hook blocks, not runs
+                return self._end_turn(
+                    turn_index,
+                    TURN_BLOCKED,
+                    appended_before,
+                    steps=0,
+                    error=f"pre-step hook failed: {describe(exc)}",
+                    continue_loop=False,
+                )
+            if decision.kind == STEP_REJECT:
+                # No step is written, so no model call happens (S7).
+                return self._end_turn(
+                    turn_index,
+                    TURN_BLOCKED,
+                    appended_before,
+                    steps=0,
+                    error=decision.reason or "a hook rejected this message",
+                    continue_loop=False,
+                )
+
         if self.hooks.pre_step is not None:
             try:
                 decision = await self.hooks.pre_step(self.session, claim)
@@ -1134,6 +1165,50 @@ class Runtime:
                 is_error=outcome.result.is_error,
                 info=_result_info(outcome),
             )
+
+        # -- post-tool: an observer may block on the result ----------------
+        #
+        # This is `PostToolUse`. The tool has already run, so a denial here means
+        # "the result is unacceptable" rather than "do not run it": the hook's
+        # feedback is recorded in place of the result, and the model learns the
+        # output was rejected rather than silently receiving it.
+        if self.hook_bridge is not None:
+            from ..hooks.protocol import DECISION_DENY
+            from ..session.events import TOOL_RESULT
+
+            for index, outcome in enumerate(report.outcomes):
+                try:
+                    decision = await self.hook_bridge.post_tool_decision(
+                        outcome.name,
+                        dict(getattr(outcome, "arguments", {}) or {}),
+                        outcome.result.content,
+                        is_error=outcome.result.is_error,
+                    )
+                except Exception as exc:  # noqa: BLE001 - a hook fault is not a turn fault
+                    log.warning("the post-tool hook failed: %s", exc)
+                    continue
+                if decision.kind == DECISION_DENY and index < len(call_seqs):
+                    self.session.append(
+                        TOOL_RESULT,
+                        {
+                            "call_id": outcome.call_id,
+                            "call_seq": call_seqs[index],
+                            "message": {
+                                "role": "tool",
+                                "content": [
+                                    {
+                                        "type": "text",
+                                        "text": decision.feedback
+                                        or decision.reason
+                                        or "a hook rejected this result",
+                                    }
+                                ],
+                            },
+                            "is_error": True,
+                            "info": {"code": "HOOK_BLOCKED"},
+                            "surface_op": "append",
+                        },
+                    )
 
         # Spill oversized results the moment they land, before the next request
         # is assembled. Doing it here rather than only at the pressure check is
