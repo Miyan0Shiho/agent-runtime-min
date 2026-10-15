@@ -838,3 +838,26 @@ MCP 工具注册的是**普通 `ToolDefinition`**——没有服务器身份、�
 ### 删掉的六个（各自确认 src/ 与 tests/ 中零引用）
 
 `validate_event_type`（与读路径的 `is_known` 重复）、`render_tools`（与 adapter 自己的渲染重复——**两个渲染器会漂移**）、`summarize_with_adapter`、`write_log`、`run_with_drain`、`capture_async`。
+
+---
+
+## 33. 棘轮的第一份产出：token 计量被**请求了然后丢掉**
+
+棘轮的基线里，`StreamCollector.set_usage` 与 `set_finish` 标着「无调用者」。顺着查下去，**这不是无用 API，是真缺陷**。
+
+| # | 发现 | 危害 | 修法 |
+|---|---|---|---|
+| 64 | **provider 的 token 用量被请求后丢弃** | adapter **明确**设了 `stream_options: {include_usage: true}`——它主动要求 provider 上报 token 数——而 `_deltas_from_chunk` **从不解析 `usage` 字段**。`Delta` 没有字段承载它，`StreamCollector.add`（**每个 delta 必经之路**）也忽略它。结果：runtime **看起来支持 token 计量，实际什么都没记**——日志里每一处 `usage` 都是缺失的 | `Delta` 增加 `usage`；adapter 解析；`add()` 消费。`_optional_int` 让「未上报」与「0」保持可区分 |
+| 65 | **finish_reason 同样被丢弃（更严重）** | 被截断的回答（`finish_reason: length`）被报成 `stop` → **截断的回答与完整回答无法区分**，调用方会在不知情的情况下**基于半个结果继续**。`max-tokens` 这个回合理由存在于词汇表里且**不可达** | `Delta` 增加 `finish_reason`；映射表里 `length` 保持 `length`、`content_filter` 变 `stop`（模型是**说完的**，只是不愿多说）、未知理由**忽略而不臆造** |
+
+### 我**又**犯了同一个错误：只处理了两条路径中的一条
+
+上一轮修 turn-stopping hook 时，我只接进了**两条回合结束路径中的一条**，hook 看起来完全没作用。这一轮，**截断理由也只接了一条**——而**纯文本回答走的正是我漏掉的那条**，所以 `length` 一直报成 `completed`。
+
+> 两个 bug 是同一个错误。**回合有两条结束路径**（有工具调用 / 无工具调用），而**最普通的结束方式走的是第二条**。教训：**「有一个地方要改」通常意味着「有两个地方要改」**。
+
+### 一处附带修正
+
+usage 原本挂在 `assistant/attempt` 上——而该事件**只在内容为空时写**。所以**每一个真正说了话的回答都丢掉了自己的 token 计数**。现在挂在 `assistant/message` 上。
+
+> **FakeServer 一直在发这两个字段**，它们被一路丢在地上。这也是为什么这个缺陷能活这么久：**测试数据是对的，消费端是错的**。
