@@ -36,6 +36,13 @@ test:
 bench: test
 	@PYTHONPATH=$(SRC):. $(PY) -m arm.bench.main
 
+# The claims the design documents left unverified, now measured. Separate from
+# `bench` because it answers a different question: `bench` asks whether the
+# acceptance criteria hold, this asks whether the design's own assumptions were
+# right.
+claims:
+	@PYTHONPATH=$(SRC):. $(PY) -c "from arm.bench.claims import run_measurements, render_report; m, ok = run_measurements(); print(render_report(m, ok)); raise SystemExit(0 if ok else 1)"
+
 bench-json:
 	@PYTHONPATH=$(SRC):. $(PY) -m arm.bench.main --json
 
