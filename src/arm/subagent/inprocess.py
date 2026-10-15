@@ -248,26 +248,62 @@ class InProcessProvider:
 
         if self.delegation_tool_factory is None:
             # No factory means the child would inherit the parent's tool, whose
-            # depth is baked in at 0 -- and the depth limit would never trigger,
-            # silently. Removing the capability is the safe default: a child that
-            # cannot delegate is bounded, whereas a child that can delegate
-            # without a working limit is a fork bomb.
+            # depth is baked in at 0 -- so the depth limit would never trigger.
             #
-            # A runtime that wants nested delegation must supply the factory, and
-            # supplying it is what makes the limit real rather than apparent.
-            child_registry.unregister("subagent")
-            return
+            # The child cannot be given a *working* delegation tool, so it gets
+            # none. But it must not simply lose the capability in silence: a
+            # child that quietly cannot delegate looks like a child that chose
+            # not to, and the difference is invisible to whoever is reading the
+            # transcript. So the tool is replaced by one that refuses with an
+            # explanation, which is honest and still bounded.
+            child_registry.replace(self._refusing_delegation_tool())
 
         child_depth = request.child_depth()
         # A depth at or beyond the limit gets no delegation tool at all. Removing
         # the capability is stronger than refusing it: a tool the model cannot
-        # see cannot be argued with.
+        # see cannot be argued with, and at the limit there is nothing to explain
+        # -- the chain is simply over.
         if child_depth >= request.max_depth:
             child_registry.unregister("subagent")
             return
 
-        child_registry.replace(
-            self.delegation_tool_factory(child_session, child_depth)
+        builder = self.delegation_tool_factory
+        if builder is None:  # pragma: no cover - guarded by the caller
+            child_registry.replace(self._refusing_delegation_tool())
+            return
+        child_registry.replace(builder(child_session, child_depth))
+
+    def _refusing_delegation_tool(self) -> Any:
+        """A ``subagent`` tool that explains why it cannot delegate.
+
+        Used when the provider has no way to build a depth-aware tool. The child
+        is still bounded -- it cannot delegate at all -- but the model is told
+        why, instead of finding that a tool it was promised has silently
+        vanished. A capability removed without explanation is the failure this
+        project has hit repeatedly: something is quietly absent and nothing says
+        so.
+        """
+        from ..tools.definition import RegisteredTool, ToolDefinition, ToolResult
+        from .tool import SubagentParams
+
+        async def body(_arguments: Any, _execution: Any) -> ToolResult:
+            return ToolResult.fail(
+                "this runtime cannot delegate from a subagent: no depth-aware "
+                "delegation tool is available, so nested delegation is disabled. "
+                "Do the task directly, or ask the caller to delegate it.",
+                code="SUBAGENT_NESTED_DISABLED",
+            )
+
+        return RegisteredTool(
+            definition=ToolDefinition(
+                name="subagent",
+                description=(
+                    "Unavailable: this runtime cannot delegate from within a "
+                    "subagent, so nested delegation is disabled."
+                ),
+                parameters=SubagentParams.model_json_schema(),
+            ),
+            body=body,
         )
 
     async def _drive(

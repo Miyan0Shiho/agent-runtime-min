@@ -87,6 +87,15 @@ If a tool fails, the failure is information: read the error and adapt. Do not
 retry the same call unchanged."""
 
 
+def team_enabled() -> bool:
+    """Whether the team tools are registered.
+
+    On by default. ``ARM_TEAM=0`` disables them, which is the case a caller who
+    wants a smaller tool surface actually asks for.
+    """
+    return os.environ.get("ARM_TEAM", "1") not in ("0", "", "false", "no")
+
+
 def _load_mcp_servers(path: Path) -> list[McpServerConfig]:
     """Read MCP server definitions from a JSON file.
 
@@ -364,7 +373,12 @@ def build_runtime(
     # The team's state lives in this session's log -- there is no second store.
     # The tools are registered only when a team is asked for, so a session that
     # never uses one is not offered five tools it will not call.
-    if os.environ.get("ARM_TEAM"):
+    # Teams are always available. They were briefly gated behind ARM_TEAM, which
+    # meant the feature could not be exercised at all in a default run -- so a
+    # defect in it was invisible to every ordinary invocation, and the only way
+    # to find one was to know the variable existed. A capability that has to be
+    # switched on to be tested is a capability that is not really tested.
+    if team_enabled():
         team = TeamJournal(session)
 
         async def team_delegate(name: str, task: str) -> str:

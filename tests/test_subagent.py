@@ -1035,3 +1035,67 @@ def test_a_chain_stops_at_the_limit_end_to_end():
     # recursing until the concurrency limit.
     assert result.stop_reason in (STOP_COMPLETED, STOP_ERROR)
     assert runtime.active == 0, "the delegation chain did not unwind"
+
+
+def test_without_a_factory_nested_delegation_is_refused_with_an_explanation():
+    """A capability removed in silence is indistinguishable from one never asked for.
+
+    Without a factory the child cannot be given a depth-aware tool, so it must
+    not delegate. But simply deleting the tool leaves the model -- and whoever
+    reads the transcript -- unable to tell "this runtime cannot delegate from a
+    subagent" from "the subagent chose not to". The tool stays and refuses, which
+    is honest and still bounded.
+    """
+    from arm.subagent.inprocess import ChildFactory, InProcessProvider
+    from arm.subagent.tool import SubagentTool
+    from arm.tools.registry import ToolRegistry
+
+    registry = ToolRegistry()
+    runtime = SubagentRuntime(registry=registry, max_depth=3)
+    provider = InProcessProvider(
+        factory=ChildFactory(build=lambda *_: None), parent_registry=registry
+    )
+    registry.register(
+        SubagentTool(runtime, parent_session=Session.create("root"), depth=0).register()
+    )
+
+    child = provider._child_registry(
+        DelegationRequest(prompt="x"), child_session=Session.create("child")
+    )
+    tool = child.get("subagent")
+    assert tool is not None, (
+        "the delegation tool vanished instead of explaining why it cannot work"
+    )
+
+    result = run(tool.body({"prompt": "go deeper"}, None))
+    assert result.is_error
+    assert result.error_code == "SUBAGENT_NESTED_DISABLED"
+    assert "cannot delegate" in result.content
+
+
+def test_at_the_depth_limit_the_tool_is_removed_entirely():
+    """At the limit there is nothing to explain: the chain is simply over."""
+    from arm.subagent.inprocess import ChildFactory, InProcessProvider
+    from arm.subagent.tool import SubagentTool
+    from arm.tools.registry import ToolRegistry
+
+    registry = ToolRegistry()
+    runtime = SubagentRuntime(registry=registry, max_depth=2)
+
+    def factory(child_session, depth):
+        return SubagentTool(
+            runtime, parent_session=child_session, depth=depth
+        ).register()
+
+    provider = InProcessProvider(
+        factory=ChildFactory(build=lambda *_: None),
+        parent_registry=registry,
+        delegation_tool_factory=factory,
+    )
+    registry.register(factory(Session.create("root"), 0))
+
+    at_limit = provider._child_registry(
+        DelegationRequest(prompt="x", depth=1, max_depth=2),
+        child_session=Session.create("child"),
+    )
+    assert "subagent" not in at_limit.view().known

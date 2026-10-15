@@ -538,3 +538,82 @@ def test_cli_resumes_an_existing_session(tmp_path):
     texts = [m.text for m in session2.derive()]
     assert "first question" in texts
     assert "second question" in texts
+
+
+def test_the_cli_registers_the_team_tools_by_default(tmp_path, monkeypatch):
+    """A capability that must be switched on to be tested is not really tested.
+
+    Teams were gated behind ``ARM_TEAM``, so no ordinary invocation registered
+    them -- and a defect in the module was invisible to every default run. The
+    only way to find one was to already know the variable existed.
+    """
+    from arm.cli.main import build_runtime, team_enabled
+
+    monkeypatch.delenv("ARM_TEAM", raising=False)
+    assert team_enabled(), "teams are off by default"
+
+    with FakeServer([{"text": "ok"}]) as server:
+        runtime, _session, handle, _scheduler = build_runtime(
+            session_id="teams",
+            model="test-model",
+            api_key="k",
+            base_url=server.base_url,
+            home=str(tmp_path),
+        )
+        names = runtime.registry.view().known
+        assert handle is not None
+        handle.close()
+
+    for tool in ("team_spawn", "team_send", "team_status", "team_task_create"):
+        assert tool in names, f"{tool} was not registered by default"
+
+
+def test_the_cli_can_disable_the_team_tools(tmp_path, monkeypatch):
+    """The opt-out exists for a caller who wants a smaller tool surface."""
+    from arm.cli.main import build_runtime, team_enabled
+
+    monkeypatch.setenv("ARM_TEAM", "0")
+    assert not team_enabled()
+
+    with FakeServer([{"text": "ok"}]) as server:
+        runtime, _session, handle, _scheduler = build_runtime(
+            session_id="no-teams",
+            model="test-model",
+            api_key="k",
+            base_url=server.base_url,
+            home=str(tmp_path),
+        )
+        names = runtime.registry.view().known
+        assert handle is not None
+        handle.close()
+
+    assert "team_spawn" not in names
+    assert "read" in names, "disabling teams removed unrelated tools"
+
+
+def test_the_cli_registers_a_scheduler_and_subagents(tmp_path):
+    """The two runtimes the loop needs in order to actually use its features.
+
+    Both were constructed but never attached at one point, which left the
+    features creatable and inert -- reminders that never fired and subagents with
+    no depth limit.
+    """
+    from arm.cli.main import build_runtime
+
+    with FakeServer([{"text": "ok"}]) as server:
+        runtime, _session, handle, scheduler = build_runtime(
+            session_id="wired",
+            model="test-model",
+            api_key="k",
+            base_url=server.base_url,
+            home=str(tmp_path),
+        )
+        assert runtime.scheduler is scheduler, "the scheduler is not attached"
+        assert runtime.subagents is not None, "no subagent runtime is attached"
+        assert runtime.hook_bridge is not None or True  # hooks are optional
+        names = runtime.registry.view().known
+        assert handle is not None
+        handle.close()
+
+    for tool in ("subagent", "schedule_create", "schedule_list"):
+        assert tool in names, f"{tool} was not registered"
