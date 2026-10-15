@@ -15,7 +15,7 @@ Two decisions worth stating:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, AsyncIterator, Literal, Mapping, Protocol
+from typing import Any, AsyncIterator, Literal, Mapping, Protocol, cast
 
 from ..session.messages import Message
 
@@ -68,11 +68,20 @@ class Delta:
 
     Text arrives in ``text``; a completed tool call arrives in ``tool_call``.
     Both may appear in one stream, in any order.
+
+    ``usage`` and ``finish_reason`` ride along because a provider reports them on
+    the stream rather than out of band. Without fields for them the adapter had
+    nowhere to put what it parsed, so the runtime requested token accounting
+    (``stream_options: {include_usage: true}``) and then discarded it.
     """
 
     text: str = ""
     tool_call: ToolCallRequest | None = None
     reasoning: str = ""
+    #: Token accounting, when the provider reports it mid-stream.
+    usage: "Usage | None" = None
+    #: Why the model stopped, when the provider says so.
+    finish_reason: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -147,12 +156,27 @@ class StreamCollector:
         self._error_code: str | None = None
 
     def add(self, delta: Delta) -> None:
+        """Fold one delta into the result.
+
+        This is the mandatory path: every delta from every adapter passes through
+        it. `usage` and `finish_reason` are consumed here rather than left to the
+        caller, because a field an adapter populates and nothing reads is
+        indistinguishable from a field that was never parsed.
+        """
         if delta.text:
             self._text.append(delta.text)
         if delta.reasoning:
             self._reasoning.append(delta.reasoning)
         if delta.tool_call is not None:
             self._calls.append(delta.tool_call)
+        if delta.usage is not None:
+            # Later reports win: a provider may send a partial count early and
+            # the final total at the end of the stream.
+            self._usage = delta.usage
+        if delta.finish_reason:
+            mapped = _map_finish_reason(delta.finish_reason)
+            if mapped is not None:
+                self._finish = mapped
 
     def set_usage(self, usage: Usage | None) -> None:
         self._usage = usage
@@ -183,6 +207,33 @@ class StreamCollector:
             error=self._error,
             error_code=self._error_code,
         )
+
+
+#: The provider's finish reasons, mapped onto this runtime's vocabulary.
+#:
+#: The mapping is not the identity, and the difference matters:
+#:
+#: * ``length`` stays ``length``, so a truncated answer remains distinguishable
+#:   from a finished one -- that distinction is what lets a caller refuse to build
+#:   on half a result;
+#: * ``content_filter`` becomes ``stop``: the model finished, it simply declined
+#:   to say more, and reporting it as an error would make a refusal look like a
+#:   fault;
+#: * an unrecognised reason maps to nothing and is ignored, because a reason the
+#:   runtime does not understand is not evidence that something went wrong.
+_FINISH_REASONS: Mapping[str, str] = {
+    "stop": "stop",
+    "length": "length",
+    "tool_calls": "tool_calls",
+    "function_call": "tool_calls",
+    "content_filter": "stop",
+}
+
+
+def _map_finish_reason(raw: str) -> FinishReason | None:
+    """Translate a provider's finish reason, or ``None`` if unrecognised."""
+    mapped = _FINISH_REASONS.get(raw.strip().lower())
+    return cast(FinishReason, mapped) if mapped is not None else None
 
 
 async def collect(adapter: ModelAdapter, request: Request) -> StreamResult:

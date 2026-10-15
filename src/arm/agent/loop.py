@@ -662,14 +662,25 @@ class Runtime:
             next_claim = self.inbox.claim()
             if next_claim.empty:
                 # This is the ordinary way a turn ends -- a text answer with no
-                # tool call -- so the hook point has to be consulted here too. It
-                # was wired into only the other path at first, which made a
-                # turn-stopping hook appear to do nothing at all.
-                if await self._hook_wants_another_step(TURN_COMPLETED, steps):
+                # tool call -- so two things belong here that were first wired
+                # into only the other path:
+                #
+                #   * the turn-stopping hook, without which a `Stop` hook did
+                #     nothing at all;
+                #   * the truncation reason, without which a cut-off answer was
+                #     reported as a completed one.
+                #
+                # Both bugs were the same mistake: handling one of two paths.
+                reason = (
+                    TURN_MAX_TOKENS
+                    if outcome.finish_reason == "length"
+                    else TURN_COMPLETED
+                )
+                if await self._hook_wants_another_step(reason, steps):
                     continue
                 return self._end_turn(
                     turn_index,
-                    TURN_COMPLETED,
+                    reason,
                     appended_before,
                     steps=steps,
                     continue_loop=False,
@@ -1030,8 +1041,17 @@ class Runtime:
                 ]
             if interrupted:
                 message["interrupted"] = True
+            # The usage rides on the message event, because the attempt event is
+            # only written when there is no content. Recording usage only there
+            # meant every answer that actually said something discarded its token
+            # counts -- which is most of them.
             self.session.append(
-                ASSISTANT_MESSAGE, {"message": message, "surface_op": "append"}
+                ASSISTANT_MESSAGE,
+                {
+                    "message": message,
+                    "surface_op": "append",
+                    "usage": _usage_record(result.usage),
+                },
             )
         else:
             # No content at all: record the attempt rather than an empty message,

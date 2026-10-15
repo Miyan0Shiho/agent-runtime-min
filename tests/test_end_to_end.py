@@ -125,9 +125,12 @@ def _chunks_for(plan: dict[str, Any]) -> list[dict[str, Any]]:
                 }
             )
 
+    # A script may name its own finish reason, so a truncated answer can be
+    # exercised without a second server.
+    final_reason = str(plan.get("finish_reason", "stop"))
     chunks.append(
         {
-            "choices": [{"delta": {}, "finish_reason": "stop", "index": 0}],
+            "choices": [{"delta": {}, "finish_reason": final_reason, "index": 0}],
             "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
         }
     )
@@ -690,3 +693,51 @@ def test_the_approval_gate_is_reachable_from_the_cli(tmp_path, monkeypatch):
         )
         assert handle is not None
         handle.close()
+
+
+def test_provider_usage_is_recorded_in_the_turn():
+    """The provider reports token usage on the stream; it must be kept.
+
+    The adapter explicitly asks for it with ``stream_options:
+    {include_usage: true}``, and then discarded it -- so the runtime recorded no
+    token counts at all while appearing to support them.
+    """
+    with FakeServer([{"text": "an answer"}]) as server:
+        runtime, session = build_runtime(server.base_url)
+        runtime.submit("go")
+        asyncio.run(runtime.run_until_idle())
+
+    # Usage rides on the assistant message, because the attempt event is only
+    # written when there is no content -- so recording it there meant every answer
+    # that said something discarded its token counts.
+    messages = [e for e in session if e.type == "assistant/message"]
+    assert messages, "no assistant message was recorded"
+    usage = messages[0].data.get("usage") or {}
+    assert usage, f"no usage was recorded: {messages[0].data}"
+    assert usage.get("total_tokens") == 15, usage
+
+
+def test_a_truncated_answer_is_distinguishable_from_a_finished_one():
+    """`finish_reason: length` must survive to the turn.
+
+    Without it, a cut-off answer was reported as `stop` -- indistinguishable from
+    a complete one, so a caller would build on half a result without knowing.
+    """
+    with FakeServer([{"text": "half an answer", "finish_reason": "length"}]) as server:
+        runtime, session = build_runtime(server.base_url)
+        runtime.submit("go")
+        outcomes = asyncio.run(runtime.run_until_idle())
+
+    assert outcomes[0].reason == "max-tokens", (
+        f"a truncated answer was reported as {outcomes[0].reason!r}"
+    )
+
+
+def test_a_normal_answer_is_still_reported_as_completed():
+    """The complement: the mapping must not turn every answer into a truncation."""
+    with FakeServer([{"text": "a complete answer"}]) as server:
+        runtime, session = build_runtime(server.base_url)
+        runtime.submit("go")
+        outcomes = asyncio.run(runtime.run_until_idle())
+
+    assert outcomes[0].reason == "completed"

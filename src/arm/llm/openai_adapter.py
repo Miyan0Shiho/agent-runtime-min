@@ -18,6 +18,7 @@ from typing import Any, AsyncIterator, Mapping
 
 from ..session.messages import Message
 from .seam import (
+    Usage,
     Delta,
     Request,
     StreamResult,
@@ -204,6 +205,22 @@ class ProviderError(RuntimeError):
         self.code = code
 
 
+def _optional_int(value: Any) -> int | None:
+    """An int, or ``None`` when the provider omitted the field.
+
+    ``None`` rather than zero: "not reported" and "zero tokens" are different
+    facts, and a zero would make an unreported count look like a measured one.
+    """
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, int):
+        return value
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _deltas_from_chunk(
     chunk: Mapping[str, Any], partial: dict[int, dict[str, str]]
 ) -> list[Delta]:
@@ -215,8 +232,29 @@ def _deltas_from_chunk(
     arguments.
     """
     out: list[Delta] = []
+
+    # The provider reports token usage on the final chunk, and only because the
+    # request asked for it with `stream_options: {include_usage: true}`. Parsing
+    # it is what makes that request mean anything: the field was being requested
+    # and then discarded, so the runtime recorded no token counts at all.
+    usage = chunk.get("usage")
+    if isinstance(usage, Mapping):
+        parsed = Usage(
+            prompt_tokens=_optional_int(usage.get("prompt_tokens")),
+            completion_tokens=_optional_int(usage.get("completion_tokens")),
+            total_tokens=_optional_int(usage.get("total_tokens")),
+        )
+        out.append(Delta(usage=parsed))
+
     for choice in chunk.get("choices") or []:
         delta = choice.get("delta") or {}
+
+        # The finish reason names why the model stopped. It is what lets a
+        # truncated answer (`length`) be distinguished from a finished one, and
+        # without it every response looked complete.
+        reason = choice.get("finish_reason")
+        if isinstance(reason, str) and reason:
+            out.append(Delta(finish_reason=reason))
 
         text = delta.get("content")
         if isinstance(text, str) and text:
