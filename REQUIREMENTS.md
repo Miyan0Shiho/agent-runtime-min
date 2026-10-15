@@ -233,7 +233,7 @@ M1 日志即事实  →  M3 工具流水线  →  M2 上下文压力  →  M4 Ev
 | Python | **3.11.14**(Homebrew `/opt/homebrew/opt/python@3.11`) | 主版本 |
 | `uv` | ✅ 已装(`~/.local/bin/uv`) | 依赖与虚拟环境管理 |
 | `pipx` / `poetry` | ❌ 未装 | 用 `uv` 即可 |
-| **`docker` CLI** | ❌ **未安装** | **Docker 沙箱后端当前无验证条件** → 该能力后置(不取消) |
+| **`docker` CLI** | ✅ **已可用（2026-10-16）** | 经 lima 的 `docker` VM + brew 的 CLI；`docker version` 客户端/服务端均 29.9.1，容器可运行 |
 | Chrome | ✅ `/Applications/Google Chrome.app` | **可走 CDP 直连,能复用用户登录态** |
 | **`playwright`** | ⚠️ **版本错位**:二进制属 Python **3.10**,3.11 下 `import` 直接失败 | 需重建,或改用 CDP |
 

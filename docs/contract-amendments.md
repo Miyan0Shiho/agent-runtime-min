@@ -980,3 +980,52 @@ tool/result replacement at seq 12 changed 'info'; only the message content may d
 **我实测了它的能力，它比看起来弱**：把 post-tool 的**接线**删掉、但保留 bridge 方法 → **它没有报警**（而行为测试报了）。这个限制**写进了测试的 docstring**，而不是留作隐含保证。
 
 > **一个悄悄少覆盖的检查，正是这六个缺陷活下来的方式。**
+
+---
+
+## 38. 环境问题：Docker 可用（2026-10-16）
+
+契约把 Docker 沙箱后端标为「后置（不取消）」，理由是**本机未安装 docker**。这个前置条件现在解决了。
+
+### 实际状况
+
+机器上**早已有一个 lima 的 `docker` VM**（`~/.lima/docker`，4 CPU / 4GiB / 100GiB），只是处于停止状态。lima 本身也已装（1.2.1）。所以缺的只有**宿主机上的 CLI**。
+
+| 步骤 | 结果 |
+|---|---|
+| `limactl start docker` | VM 启动，guest 内 docker **29.9.1** |
+| `brew install docker` | CLI 29.9.1（只装客户端，不装 Docker Desktop） |
+| `docker context create lima-docker` | 指向 `~/.lima/docker/sock/docker.sock` |
+
+### 途中修掉的一个坑
+
+第一次 `docker run` 报：
+
+```
+error getting credentials - err: exec: "docker-credential-desktop": executable file not found
+```
+
+原因：`~/.docker/config.json` 里留着 `"credsStore": "desktop"`，那是 **Docker Desktop 的凭据助手**，而 Desktop 已经不在机器上了（只剩 `~/.docker/` 里的残留）。于是**每一次拉镜像都失败**，而错误信息指向的是一个根本不存在的程序。
+
+**已备份原文件到 `~/.docker/config.json.bak`**，删掉 `credsStore` 一行，CLI 回退到内置存储。
+
+> 这个坑值得记：**卸载一个工具会留下配置，而配置指向的程序已经不存在**。失败发生在**使用**的时候，错误却指向**安装**的问题——排查方向被带偏。
+
+### 验证：沙箱后端需要的每一个原语都可用
+
+| 原语 | 验证 |
+|---|---|
+| 运行容器 | `docker run --rm hello-world` → exit 0 |
+| 挂载工作目录并执行 | `-v /tmp:/work -w /work python:3.11-slim python3 -c ...` → 输出正确 |
+| 网络隔离 | `--network none` → 容器正常启动 |
+| **只读挂载** | `-v /tmp:/work:ro` → 写入**被拒绝**（`workspace-write` vs `read-only` 就靠这个） |
+
+### 一条**未解决**的限制
+
+**VM 没有配 autostart，也没有 launch agent**，所以**重启后 docker 不可用**，需要手动 `limactl start docker`。
+
+我没有替你打开 autostart：它会让一个 4GiB 的虚拟机**开机自启**，那是关于你这台机器常驻负载的决定，不该由我替你定。需要的话一条命令：
+
+```
+limactl start --set-default=false docker   # 或给 VM 加 autostart: true
+```
