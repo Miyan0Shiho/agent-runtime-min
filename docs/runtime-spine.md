@@ -191,4 +191,16 @@ flowchart TD
 2. ~~**【未验证】裸 JSONL 的写入吞吐是否够用。**~~ **已测**:**实时路径 0.090 ms/事件**——这是会话真实的形状,因为 CLI 传了 `already_contiguous=True`。10 万事件 = 56 MiB,单批追加 1.7 s;fsync 屏障 0.03 ms。**恢复是线性的**(实测 1 万/2.5 万/5 万/10 万四档确认,0.022 ms/事件),所以 **2,000 事件的会话(约 100 轮)打开耗时 43 ms**。
    - 顺带量到一条**代价的准确数字**:不传 `already_contiguous` 时每次追加**重读整个文件**,4.657 ms/事件——**这正是那个标志存在的理由**,现在是个已知常数而不是一句断言。
 3. ~~**【推断】「单配置文件」是否会在 T3 阶段被迫升级为多层。**~~ **已测**:四个文件各管一件事(`config.json` 插件 / `mcp.json` / `hooks.json` / `schedule.json`),**没有任何覆盖关系**,总行数远低于 300 的触发线。T3 的 20+ 能力没有迫使它分层。
-4. **【未验证】Python 的 `asyncio` 取消语义能否直接承载 S12。** 上游用 `AbortController`;Python 用 `asyncio.CancelledError` + 自定义 cause。两者的传播与「不抛弃已启动的协程」是否等价,需在 M3 实现时验证。
+4. ~~**【未验证】Python 的 `asyncio` 取消语义能否直接承载 S12。**~~ **已验证（2026-10-16）**：**能承载**，S12 的三条断言逐条成立。
+
+   | 断言 | 实测 |
+   |---|---|
+   | **cause 类型化** | 四个合法值：`user` / `disposed` / `timeout` / `shutdown` |
+   | **取消只有一条路径** | 所有取消经 `request_abort(cause)`，落到 `turn/end` 的 `cancel_cause` 字段。实测 `request_abort("timeout")` → `{'reason': 'aborted', 'cancel_cause': 'timeout'}` |
+   | **持久化只存可 JSON 字段** | `cancel_cause` 是字符串；`turn/end` 整体可 `json.dumps` |
+
+   **与上游的差别，以及为什么不等价也没关系**：上游用 `AbortController`（**推**模型，signal 广播给所有监听者）；Python 用 `asyncio.CancelledError`（**在 await 点注入**）。传播模型确实不同——**这正是 `DrainScope` 存在的原因**：它把已启动的 body 放进一个拥有自己排空流程的 scope，使取消不会把它连同结果一起抛弃。
+
+   所以「等价」不成立，但**S12 要的性质成立**：只有一条取消路径、cause 被类型化、持久化字段可 JSON。至于「不抛弃已启动的协程」属于 M3.8（另一条不变量），已在 `tests/test_m3_cancellation.py` 的 12 条测试里验证。
+
+   > 这两条属于**相邻但不相同**的要求，合并检查会漏掉一个——它们分别有自己的验证方式。

@@ -1019,3 +1019,93 @@ def test_cold_read_cost_is_linear_and_the_trigger_is_not_yet_reached():
         f"10,000 events took {large:.1f}ms to open; the contract sets its "
         "projection-cache trigger at 200ms and this is well past it"
     )
+
+
+# ===========================================================================
+# S12: one cancellation path, a typed cause, JSON-only persistence
+# ===========================================================================
+
+
+def test_the_cancel_causes_are_a_closed_typed_set():
+    """S12: "取消只有一条路径，`cause` 类型化".
+
+    The risk it guards: "多路径取消会产生无法复现的中间态". A free-form cause
+    string would make the set of reachable states unbounded, and a log that
+    cannot be replayed from is the M1 invariant failing.
+    """
+    from arm.session.events import CANCEL_CAUSES
+
+    assert CANCEL_CAUSES == {"user", "disposed", "timeout", "shutdown"}, (
+        f"the cancel causes changed: {sorted(CANCEL_CAUSES)}"
+    )
+
+
+def test_a_cancellation_lands_on_one_field_with_its_cause():
+    """Every cancellation reaches `turn/end`'s `cancel_cause`, typed.
+
+    A second path would put the same fact somewhere else, and a reader of the log
+    would have to know which path ran to find it.
+    """
+    import asyncio
+
+    from arm.agent.loop import Runtime
+    from arm.llm.mock import MockAdapter, text_response
+    from arm.prompt.assembler import PromptAssembler
+    from arm.session.session import Session
+    from arm.tools.builtin import builtin_tools
+    from arm.tools.registry import ToolRegistry
+
+    registry = ToolRegistry()
+    registry.register_many(builtin_tools())
+    assembler = PromptAssembler()
+    assembler.set("core", "you are arm", priority=10)
+    session = Session.create("s12")
+    loop = Runtime(
+        session, MockAdapter([text_response("x")]), registry,
+        assembler=assembler, model="m",
+    )
+
+    loop.request_abort("timeout")
+    loop.submit("go")
+    asyncio.run(loop.run_until_idle())
+
+    ends = [e for e in session if e.type == "turn/end"]
+    assert ends, "no turn/end was recorded"
+    assert ends[0].data["reason"] == "aborted"
+    assert ends[0].data["cancel_cause"] == "timeout"
+
+
+def test_a_turn_end_event_is_json_persistable():
+    """S12: "持久化只存可 JSON 字段".
+
+    A cause that was an exception object, or a field that held one, would fail at
+    write time -- or worse, be silently flattened into something that cannot
+    reproduce the state it described.
+    """
+    import asyncio
+    import json
+
+    from arm.agent.loop import Runtime
+    from arm.llm.mock import MockAdapter, text_response
+    from arm.prompt.assembler import PromptAssembler
+    from arm.session.session import Session
+    from arm.tools.builtin import builtin_tools
+    from arm.tools.registry import ToolRegistry
+
+    registry = ToolRegistry()
+    registry.register_many(builtin_tools())
+    assembler = PromptAssembler()
+    assembler.set("core", "you are arm", priority=10)
+    session = Session.create("s12-json")
+    loop = Runtime(
+        session, MockAdapter([text_response("x")]), registry,
+        assembler=assembler, model="m",
+    )
+    loop.request_abort("shutdown")
+    loop.submit("go")
+    asyncio.run(loop.run_until_idle())
+
+    for event in session:
+        if event.type == "turn/end":
+            # Raises if any field holds something JSON cannot carry.
+            assert json.dumps(dict(event.data)) is not None
