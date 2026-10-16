@@ -268,6 +268,22 @@ class Thresholds:
                     "E5: retain_ratio must be below the effective threshold_ratio, "
                     "otherwise compaction retains more than it removes"
                 )
+        if self.retain_tokens is not None and self.context_window is not None:
+            # E5 applies to `retain_tokens` too, and it was only checked for
+            # `retain_ratio`. The two are alternative spellings of the same
+            # setting -- `retain_tokens` wins when both would be given, and they
+            # are refused together -- so checking one and not the other meant the
+            # invariant held or not depending on which spelling the caller used.
+            #
+            # Measured: `retain_tokens=200000` against a threshold of 160000 was
+            # accepted, and that configuration can never compact below its
+            # threshold -- compaction retains more than it removes, which is the
+            # exact condition E5 exists to refuse.
+            if self.retain_tokens >= self.threshold_tokens:
+                raise ValueError(
+                    "E5: retain_tokens must be below the threshold, otherwise "
+                    "compaction retains more than it removes"
+                )
 
     @property
     def message_budget(self) -> int:

@@ -834,3 +834,130 @@ def test_a_sweep_does_not_remove_the_file_just_written(tmp_path):
     assert len(store.get(locator)) == 5_000, (
         "the store swept away the spill it had just written"
     )
+
+
+def test_retain_tokens_must_also_be_below_threshold():
+    """E5 applies to `retain_tokens`, and it was only checked for `retain_ratio`.
+
+    The two are alternative spellings of the same setting, so checking one and
+    not the other meant the invariant held or not depending on which spelling the
+    caller used. Measured before the fix: `retain_tokens=200000` against a
+    threshold of 160000 was accepted, and that configuration can never compact
+    below its threshold -- compaction retains more than it removes, which is the
+    exact condition E5 exists to refuse.
+    """
+    # threshold = min(200000 * 0.8, 200000 - 0) = 160000
+    with pytest.raises(ValueError, match="E5"):
+        Thresholds(
+            context_window=200_000,
+            headroom=0,
+            threshold_ratio=0.8,
+            retain_ratio=None,
+            retain_tokens=200_000,
+        )
+
+
+def test_retain_tokens_exactly_at_the_threshold_is_refused():
+    """The boundary is `>=`, not `>`.
+
+    Retaining exactly the threshold amount removes nothing: the context is
+    immediately back at the threshold that triggered the compaction.
+    """
+    with pytest.raises(ValueError, match="E5"):
+        Thresholds(
+            context_window=200_000,
+            headroom=0,
+            threshold_ratio=0.8,
+            retain_ratio=None,
+            retain_tokens=160_000,
+        )
+
+
+def test_retain_tokens_just_below_the_threshold_is_accepted():
+    """The complement: a legitimate configuration must still load."""
+    thresholds = Thresholds(
+        context_window=200_000,
+        headroom=0,
+        threshold_ratio=0.8,
+        retain_ratio=None,
+        retain_tokens=159_999,
+    )
+    assert thresholds.retain_tokens_value == 159_999
+
+
+# ===========================================================================
+# M2.2: the prune marker appears exactly once, in every legal configuration
+# ===========================================================================
+
+
+def test_the_prune_marker_is_inserted_exactly_once_across_legal_configs():
+    """The contract asks for this as a property test.
+
+    "对 head_chars ∈ {0,1,...}、多文本块/富块交错、total == removed_end 等边界做
+    属性测试" -- the upstream implementation never checked it exhaustively either.
+
+    "Exactly once" matters because the marker tells the model that content was
+    removed. Two markers in one message would misreport how much is missing, and
+    zero markers would make a pruned message indistinguishable from an intact one.
+    """
+    from arm.context.prune import Pruner
+
+    checked = 0
+    anomalies: list[str] = []
+
+    for head in (0, 1, 2, 5, 10, 50, 100, 500, 1000, 4000):
+        for tail in (0, 1, 10, 100, 1000):
+            try:
+                pruner = Pruner(head_chars=head, tail_chars=tail)
+            except ValueError:
+                # An illegal combination, refused at construction -- that is a
+                # different requirement and covered elsewhere.
+                continue
+
+            session = Session.create("prune-prop")
+            # A tool result large enough to be worth pruning, built with multiple
+            # interleaved blocks so the splicing path sees more than one.
+            big = "A" * 5_000
+            session.append(
+                "tool/result",
+                {
+                    "message": {
+                        "role": "tool",
+                        "content": [
+                            {"type": "text", "text": big[:2500]},
+                            {"type": "text", "text": big[2500:]},
+                        ],
+                    },
+                    "call_id": "c1",
+                    "call_seq": 0,
+                    "surface_op": "append",
+                },
+            )
+            seq = session.surface.nodes[-1]
+            plan = pruner.plan(session, seq)
+            if plan is None:
+                continue
+
+            rendered = str(plan)
+            count = rendered.count("characters pruned")
+            if count != 1:
+                anomalies.append(f"head={head} tail={tail}: marker appeared {count}x")
+            checked += 1
+
+    assert checked > 0, "no configuration was exercised, so nothing was verified"
+    assert not anomalies, anomalies
+
+
+def test_a_pruned_message_differs_from_an_intact_one():
+    """The marker is what makes a pruned message recognisable.
+
+    Without it, a model reading the context cannot tell that content is missing.
+    """
+    from arm.context.prune import PRUNE_MARKER
+
+    assert "pruned" in PRUNE_MARKER.lower(), (
+        "the marker does not say that anything was removed"
+    )
+    assert "{removed}" in PRUNE_MARKER, (
+        "the marker does not report how much was removed"
+    )
