@@ -1550,3 +1550,72 @@ def test_a_caller_abort_is_refused_before_the_body_starts():
 
     assert result.is_error
     assert not execution.started, "the body started despite an abort"
+
+
+# ===========================================================================
+# M3.4: restrict validates the entry, admission is per-call
+# ===========================================================================
+
+
+def test_a_tool_registered_after_a_restriction_is_admitted():
+    """The contract's M3.4 asked whether this semantic is acceptable.
+
+    It is, and the reason is the distinction between validating an *entry* and
+    deciding *admission*:
+
+    * `allow` entries are checked against the tools that exist **now**, because an
+      allow-list entry naming nothing is a silent configuration error -- someone
+      wrote a name they believed in and it does nothing;
+    * admission is computed **per call**, so a tool registered later is reachable.
+
+    Pinning it here because the alternative reading is just as plausible -- "the
+    restriction froze the registry" -- and a later change could pick that reading
+    without noticing it was a decision.
+    """
+    from arm.tools.definition import RegisteredTool, ToolDefinition
+
+    async def body(_arguments, _execution):
+        from arm.tools.definition import ToolResult
+
+        return ToolResult.ok("ran")
+
+    def tool(name: str) -> RegisteredTool:
+        return RegisteredTool(
+            definition=ToolDefinition(name=name, description="", parameters={}),
+            body=body,
+        )
+
+    registry = ToolRegistry()
+    registry.register(tool("read"))
+    registry.restrict(allow=["read"])
+
+    # A tool that did not exist when the restriction was taken.
+    registry.register(tool("later"))
+
+    assert registry.get("later") is not None, (
+        "a later registration was frozen out by an earlier restriction"
+    )
+
+
+def test_a_restriction_naming_nothing_is_refused():
+    """The other half: validating the entry is what makes the check useful."""
+    from arm.tools.definition import RegisteredTool, ToolDefinition
+
+    async def body(_arguments, _execution):
+        from arm.tools.definition import ToolResult
+
+        return ToolResult.ok("ran")
+
+    registry = ToolRegistry()
+    registry.register(
+        RegisteredTool(
+            definition=ToolDefinition(name="read", description="", parameters={}),
+            body=body,
+        )
+    )
+
+    with pytest.raises(Exception) as info:
+        registry.restrict(allow=["typo-that-names-nothing"])
+    assert "typo-that-names-nothing" in str(info.value), (
+        "the refusal does not say which name was wrong, so it cannot be acted on"
+    )
