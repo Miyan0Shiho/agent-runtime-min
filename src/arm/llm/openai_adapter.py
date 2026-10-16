@@ -69,9 +69,30 @@ class OpenAICompatibleAdapter:
         headers.update(self._extra_headers)
         return headers
 
+    #: Internal roles that are not universal on the wire.
+    #:
+    #: `developer` is this runtime's name for "instructions the system added
+    #: later" -- the tool catalogue. OpenAI accepts the role; most
+    #: OpenAI-compatible providers do not, and DeepSeek rejects the whole request:
+    #:
+    #:     messages[2].role: unknown variant `developer`, expected one of
+    #:     `system`, `user`, `assistant`, `tool`
+    #:
+    #: Measured by running the runtime against a real provider, after every turn
+    #: failed with an error whose only diagnostic lived in the session log.
+    #:
+    #: The role is mapped rather than the internal vocabulary changed, because the
+    #: distinction is real (M1.13 names it) and this is where provider differences
+    #: belong. The mapping is **forward-only and lossy in reverse** -- both
+    #: `system` and `developer` become `system` -- which is fine for M1, whose
+    #: claim is that the log reconstructs the request, not that the request
+    #: reconstructs the log.
+    _WIRE_ROLES = {"developer": "system"}
+
     def _render_message(self, message: Message) -> dict[str, Any]:
         """Convert a derived message into the wire shape."""
-        payload: dict[str, Any] = {"role": message.role}
+        role = self._WIRE_ROLES.get(message.role, message.role)
+        payload: dict[str, Any] = {"role": role}
 
         text = message.text
         if message.role == "tool":

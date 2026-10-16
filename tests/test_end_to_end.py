@@ -228,10 +228,12 @@ def test_full_turn_over_http():
     sent = server.received[0]
     assert sent["model"] == "test-model"
     assert sent["stream"] is True
-    # system prompt, the user's question, and the developer notice announcing
-    # the tool set -- in that order.
+    # system prompt, the user's question, and the tool-set notice -- in that order.
+    # The notice is a `developer` message internally and arrives as `system`,
+    # because most OpenAI-compatible providers reject the `developer` role.
+    # Asserted on the raw wire, so this is the wire form.
     roles = [m["role"] for m in sent["messages"]]
-    assert roles == ["system", "user", "developer"]
+    assert roles == ["system", "user", "system"], roles
 
 
 def test_streamed_text_is_reassembled_across_chunks():
@@ -348,7 +350,18 @@ def test_replay_reproduces_the_request_byte_for_byte(tmp_path):
 
     # Every request the server saw must be reproducible from the log: each
     # request was a prefix of the final transcript at the moment it was sent.
-    replayed = [m.to_record() for m in restored.derive()]
+    #
+    # The replayed messages are rendered through the *same adapter*, because the
+    # comparison is between two wire forms. Comparing the wire against the
+    # internal record instead would fail on the deliberate `developer` -> `system`
+    # rename -- and the inverse mapping is ambiguous (both internal roles render
+    # as `system`), so it cannot be undone.
+    #
+    # M1's claim is that the log reconstructs the request. Reconstruction runs
+    # log -> wire, and that direction is exact; the reverse is not claimed and is
+    # not needed.
+    adapter = OpenAICompatibleAdapter(api_key="k", base_url="http://x", model="m")
+    replayed = [adapter._render_message(m) for m in restored.derive()]
     for sent in server.received:
         wire = _render_wire_messages(sent["messages"])
         # The replayed transcript starts with exactly what was sent.
@@ -358,33 +371,22 @@ def test_replay_reproduces_the_request_byte_for_byte(tmp_path):
 
 
 def _render_wire_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Normalize wire messages into the shape ``Message.to_record`` produces.
+    """Keep only the fields the runtime controls, for a wire-to-wire comparison.
 
-    Only the fields the runtime controls are compared; provider-specific extras
-    (``content: null`` for a tool-calling assistant message, for instance) are
-    normalized away so the comparison is about content, not formatting.
+    Both sides are wire forms -- the server captured the request as sent, and the
+    adapter produces the request from the log -- so this drops provider-specific
+    extras rather than translating between shapes. Translating was wrong: the
+    earlier version converted the received form into the *internal* record shape,
+    which then differed from the adapter's output in content representation and
+    tool-call layout, neither of which is what M1 is about.
     """
     out: list[dict[str, Any]] = []
     for message in messages:
-        record: dict[str, Any] = {"role": message["role"]}
-        content = message.get("content")
-        if isinstance(content, str) and content:
-            record["content"] = [{"type": "text", "text": content}]
-        else:
-            record["content"] = []
-        if message.get("tool_call_id"):
-            record["tool_call_id"] = message["tool_call_id"]
-        if message.get("name"):
-            record["name"] = message["name"]
-        if message.get("tool_calls"):
-            record["tool_calls"] = [
-                {
-                    "id": call["id"],
-                    "name": call["function"]["name"],
-                    "arguments": json.loads(call["function"]["arguments"]),
-                }
-                for call in message["tool_calls"]
-            ]
+        record: dict[str, Any] = {
+            key: message[key]
+            for key in ("role", "content", "tool_call_id", "name", "tool_calls")
+            if key in message
+        }
         out.append(record)
     return out
 
