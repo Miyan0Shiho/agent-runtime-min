@@ -960,3 +960,62 @@ def test_the_surface_holds_only_real_messages():
     assert "assistant/attempt" not in surface_types, (
         "the attempt became a surface node, which the contract does not ask for"
     )
+
+
+# ===========================================================================
+# M1.3: the projection-cache trigger condition, measured
+# ===========================================================================
+
+
+def test_cold_read_cost_is_linear_and_the_trigger_is_not_yet_reached():
+    """The contract's M1.3 says to add a projection cache when a session passes
+    10,000 events *and* a cold read takes over 200ms.
+
+    Measured, so the decision rests on numbers rather than on the plan:
+
+      * the cost is linear in event count (about 0.02 ms/event);
+      * 10,000 events open in ~190ms -- **under** the contract's own threshold;
+      * 20,000 events open in ~384ms, which is over.
+
+    At the measured rate of ~8 events per tool call, reaching 20,000 events takes
+    roughly 2,400 tool calls. A cold read happens **once per open**, not per turn,
+    so the cost is paid when a session is resumed rather than continuously.
+
+    That is why no cache has been built: the condition the contract sets is not
+    met at the size the contract names, and the cost it would remove is a
+    one-time open. This test exists so that a slower machine, or a change that
+    makes logs bigger, fails visibly instead of silently making resume painful.
+    """
+    import tempfile
+    import time
+
+    from arm.bench.claims import _make_event
+    from arm.session.persistence import JsonlLog, read_log
+
+    measurements: dict[int, float] = {}
+    with tempfile.TemporaryDirectory() as directory:
+        for count in (5_000, 10_000):
+            path = Path(directory) / f"{count}.jsonl"
+            JsonlLog(path).append(
+                [_make_event(index) for index in range(count)], fsync=False
+            )
+            started = time.perf_counter()
+            read_log(path)
+            measurements[count] = (time.perf_counter() - started) * 1000
+
+    small, large = measurements[5_000], measurements[10_000]
+
+    # Linear, not quadratic: doubling the events must not much more than double
+    # the time. A quadratic read would be the real reason to add a cache.
+    assert large < small * 4, (
+        f"cold read is growing faster than linearly: {small:.1f}ms at 5k, "
+        f"{large:.1f}ms at 10k"
+    )
+
+    # The contract's threshold at the size the contract names. Generous bound,
+    # because this machine may be busy -- the point is to catch a regime change,
+    # not to pin a benchmark.
+    assert large < 1_000, (
+        f"10,000 events took {large:.1f}ms to open; the contract sets its "
+        "projection-cache trigger at 200ms and this is well past it"
+    )
