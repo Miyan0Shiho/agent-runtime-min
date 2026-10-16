@@ -1099,3 +1099,135 @@ def test_at_the_depth_limit_the_tool_is_removed_entirely():
         child_session=Session.create("child"),
     )
     assert "subagent" not in at_limit.view().known
+
+
+# ===========================================================================
+# The output schema must be told to the child, not only enforced against it
+# ===========================================================================
+
+
+def test_the_output_schema_reaches_the_prompt_the_child_actually_receives():
+    """The schema was used only to validate, never to instruct.
+
+    Found by running a real delegation: the parent asked for JSON, the child
+    wrote a prose summary, the schema check failed, and the call reported an
+    error -- while the child had in fact done the work. Nothing told the child
+    what shape was wanted, so it could not have complied even in principle.
+
+    **Asserted on the child's own log**, not on the helper that builds the
+    instruction. My first version of this test called the helper directly and
+    passed even after I deleted the line that used it -- a test of the part
+    rather than of the whole, which is the failure mode this project keeps
+    finding.
+    """
+    import asyncio
+
+    from arm.llm.mock import text_response
+    from arm.subagent.contracts import DelegationRequest
+
+    schema = {
+        "type": "object",
+        "properties": {"path": {"type": "string"}},
+        "required": ["path"],
+    }
+
+    # Capture the child sessions the factory builds, so the prompt can be read
+    # from the child's own log rather than from the code that built it.
+    from arm.agent.loop import Runtime as _Runtime
+    from arm.llm.mock import MockAdapter as _MockAdapter
+    from arm.prompt.assembler import PromptAssembler
+    from arm.subagent.inprocess import ChildFactory as _ChildFactory, InProcessProvider
+    from arm.subagent.runtime import SubagentRuntime
+
+    built: list[Session] = []
+    registry = ToolRegistry()
+
+    def build(child_session, child_registry, request):
+        built.append(child_session)
+        assembler = PromptAssembler()
+        assembler.set("core", "you are a subagent", priority=10)
+        return _Runtime(
+            child_session,
+            _MockAdapter([text_response('{"path": "/tmp/x"}')]),
+            child_registry,
+            assembler=assembler,
+            model="mock",
+        )
+
+    runtime = SubagentRuntime(registry=registry, max_depth=DEFAULT_MAX_DEPTH)
+    runtime.register_provider(
+        InProcessProvider(factory=_ChildFactory(build=build), parent_registry=registry)
+    )
+    parent = Session.create("parent")
+
+    result = asyncio.run(
+        runtime.run(
+            DelegationRequest(prompt="do the thing", output_schema=schema), parent=parent
+        )
+    )
+
+    assert built, "no child session was built, so this test checks nothing"
+    assert result.stop_reason == STOP_COMPLETED, result.error
+
+    prompts = [
+        event.data["message"]["content"][0]["text"]
+        for event in built[0].events()
+        if event.type == "user/message"
+    ]
+    assert prompts, "no prompt was recorded for the child"
+    first = prompts[0]
+    assert "JSON" in first, f"the child was never told the output format: {first!r}"
+    assert "path" in first, f"the schema's fields are missing: {first!r}"
+
+
+def test_the_delegation_succeeds_when_the_child_returns_the_required_shape():
+    """The complement: a compliant child must be reported as completed."""
+    import asyncio
+
+    from arm.llm.mock import text_response
+    from arm.subagent.contracts import DelegationRequest
+
+    runtime = build_runtime_with_child([text_response('{"path": "/tmp/x"}')])
+    parent = Session.create("parent")
+
+    result = asyncio.run(
+        runtime.run(
+            DelegationRequest(
+                prompt="do the thing",
+                output_schema={
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                    "required": ["path"],
+                },
+            ),
+            parent=parent,
+        )
+    )
+
+    assert result.stop_reason == STOP_COMPLETED, (
+        f"a compliant child was reported as failed: {result.error}"
+    )
+    assert result.structured == {"path": "/tmp/x"}, result.structured
+
+
+def test_the_schema_instruction_is_valid_json_when_parsed_out():
+    """The schema is inline so a child can comply exactly.
+
+    A child that has to infer the format from a validator's error message has
+    already failed the call once, and the parent pays for that turn.
+    """
+    import json as jsonlib
+
+    from arm.subagent.inprocess import _schema_instruction
+
+    schema = {
+        "type": "object",
+        "properties": {"a": {"type": "string"}, "b": {"type": "integer"}},
+        "required": ["a", "b"],
+    }
+    instruction = _schema_instruction(schema)
+
+    start = instruction.index("{")
+    end = instruction.rindex("}") + 1
+    parsed = jsonlib.loads(instruction[start:end])
+    assert parsed == schema, "the schema was not rendered faithfully"

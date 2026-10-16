@@ -329,6 +329,20 @@ class InProcessProvider:
             # recorded once and reused across turns.
             prompt = f"{request.persona}\n\n{prompt}"
 
+        if request.output_schema is not None:
+            # The child has to be *told* the shape, not merely judged against it.
+            #
+            # Found by running a real delegation: the parent asked for JSON, the
+            # child wrote a prose summary, the schema check failed, and the call
+            # reported an error -- while the child had in fact done the work. The
+            # schema was used only to validate the answer and never reached the
+            # prompt, so the child could not have complied even in principle.
+            #
+            # The schema goes in the task rather than the child's system prompt
+            # for the same reason the persona does: it describes *this
+            # delegation*, and a system prompt is recorded once and reused.
+            prompt = f"{prompt}\n\n{_schema_instruction(request.output_schema)}"
+
         child.submit(prompt)
         await child.run_until_idle()
 
@@ -380,6 +394,24 @@ class InProcessProvider:
                     events=len(child_session),
                 )
             )
+
+
+def _schema_instruction(schema: Mapping[str, Any]) -> str:
+    """Tell a child the exact shape its final answer must take.
+
+    Stated as a requirement with the schema inline, rather than as a request to
+    "be structured": a child that has to infer the format from the validator's
+    error message has already failed the call once, and the parent pays for that
+    turn.
+    """
+    import json
+
+    rendered = json.dumps(dict(schema), indent=2, sort_keys=True)
+    return (
+        "Your final answer must be a single JSON value matching this schema, and "
+        "nothing else -- no prose, no code fences:\n\n"
+        f"{rendered}"
+    )
 
 
 def _validate_structured(
