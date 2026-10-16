@@ -288,4 +288,23 @@ DSH 源码里**既没有官方包,也没有 `ctx` 服务或持久事件**。这�
    **所以 Eval 的权重不是押在一个样本上**——它是 17 份里 **4 份（约 24%）** 的共同要求，而且在**不同规模、不同细分方向**的公司里都出现（安防巨头 / 机器人 / 产品向 / 大厂）。**样本换人也不会让这个信号消失。**
 
    **仍然保留的部分**：文档建议的「2027-01 重新核验」**依然有意义**，但理由变了——不是「怕样本只有一个」，而是**岗位池本身会变**（春招与秋招的岗位构成不同）。这一条从「待证推断」降级为「**常规的季节性复核**」。
-5. **【未验证】社区插件与 DSH 官方契约的兼容成本。** 未验证「从事件日志派生记忆」是否真的比独立存储更省事——这需要一次 2 天的小实验。
+5. ~~**【未验证】社区插件与 DSH 官方契约的兼容成本。**~~ **本项目已经把这个实验做完了（2026-10-16）** —— 不是 2 天的小实验，而是**两种模式都实现并上线**，所以可以直接给出结论。
+
+   问题原文是「从事件日志派生记忆是否真的比独立存储更省事」。本项目**两者都有**：
+
+   | 状态 | 存放方式 | 代码里的理由 |
+   |---|---|---|
+   | `goal`（持久目标）、`todo` | **日志派生**（fold from the log） | `todo/store.py`：「The list is folded from the log like every other durable state here」 |
+   | `schedule`（提醒） | **独立存储**（唯一的例外） | `schedule/runtime.py`：「This is the one durable store in the runtime that is **not** the session log, and the reason is worth stating because it looks like an inconsistency」 |
+
+   **判据不是「省事」，是「这件事发生时，会话是否在场」**：
+
+   > 「Everything else lives in a session log because a session is always the thing being worked on. A reminder is different: **it must fire at a wall-clock time whether or not its session is loaded**... Putting reminders in the session log would mean they only exist once the session is loaded -- **which is precisely the situation a reminder is supposed to escape.**」
+
+   **所以对「从日志派生记忆」的直接回答**：
+
+   - **日志派生的成本比想象的低**——`goal` 与 `todo` 都是这么做的，没有额外机制；折叠逻辑与 M1 的重放共用同一条路径。
+   - **但它的适用条件是一条硬边界**：**状态必须在「会话在场」时才需要存在**。一旦某状态需要在**没有会话加载**时也生效（提醒、定时任务），日志派生就**结构性地**不成立——不是更贵，是**根本做不到**。
+   - **记忆系统属于哪一类，取决于它的使用方式**：若记忆只在某会话里被读写，日志派生更省事；若记忆要**跨会话、且可能在无会话时被查询或写入**（这通常是「记忆」的意义所在），就必须独立存储。
+
+   > 这条从「未验证的实验」变成了**已实现的结论**：本项目用两个真实模块给出了这个取舍的分界线。
