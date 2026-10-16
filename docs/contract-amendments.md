@@ -1382,3 +1382,61 @@ status            -> active → inactive（这就是回执）
 这次**不需要补测试**：安全拒绝（`test_removal_refuses_when_there_are_uncommitted_changes`）、force 覆盖、`delete_branch`（含**通过工具**的路径）**都已经有测试**。
 
 > **「不需要改动」是一个需要核实后才能得出的结论**，不是「没什么可说的」。我逐条查了参数透传、根目录清理、以及测试覆盖，才敢写「通过」。
+
+---
+
+## 48. Browser 真跑验证：**通过**（本轮无缺陷）
+
+第六个真跑的功能。**没有触碰用户自己的 Chrome** —— 这一点先说，因为它是本轮最重要的操作决定。
+
+### 怎么做到「真跑但不碰用户的浏览器」
+
+`browser/cdp.py` 的设计是明确的：**附加到你用 `--remote-debugging-port` 自己启动的浏览器**（理由写在模块开头：无头浏览器过不了 Cloudflare 挑战页）。用户有 15 个 Chrome 进程在跑，而 **9222 上没有 CDP**。
+
+**用 `--remote-debugging-port` 重启用户的 Chrome 会把它登录态的会话暴露出去** —— 那是真实副作用，我不该擅自做。
+
+于是我起了一个**完全隔离的实例**：
+
+```
+--remote-debugging-port=9333 --user-data-dir=<临时目录> --headless=new
+```
+
+**独立的 profile、独立的端口**，与用户的会话没有任何交集。跑完 `pkill` + 删临时目录。
+
+### 实测（走真实 provider）
+
+| 场景 | 结果 |
+|---|---|
+| 只读路径 | ✅ `browser_open` → `browser_text`，正确读出 example.com 的 `<h1>` |
+| **交互路径** | ✅ `browser_evaluate`（先查真实选择器）→ `browser_fill` 填 `Ada` → `browser_click` → `browser_text` |
+| **结果可归因** | ✅ 点击前段落是 `nothing yet`，点击后是 **`SUBMITTED:Ada`** |
+
+模型自己做了**正确的实验设计**：先读一遍确认初始状态（`nothing yet`），交互后再读一次（`SUBMITTED:Ada`），于是**变化可归因于那次点击**，而不是「页面上本来就有这段字」。它还显式说明「我查了真实选择器 `#name`/`#go`/`#out`，而不是猜」。
+
+### 一处「失败」是**正确的设计**
+
+模型第一次调 `browser_navigate` 得到：
+
+```
+Error: not attached to a page; call attach first
+```
+
+它随即改用 `browser_open`（**附加 + 导航一步完成**），并把这件事记下来备后续使用。
+
+**这不是缺陷**：错误消息**同时说明了问题是什么、以及该用哪个工具**。`browser_open` 与 `browser_navigate` 是两个不同的操作，「没附加就导航」本来就该拒绝。
+
+> 值得对比第 43 节（plan mode）里那句「没有进入路径」—— **同样是一条工具缺失，但那里缺的是能力，这里缺的只是顺序**：先 attach 再 navigate 是存在的，只是要两步。
+
+### 用过的工具集（完整）
+
+```
+browser_navigate（预期失败，告知用法）
+browser_open  browser_text  browser_evaluate
+browser_fill  browser_click  browser_text
+```
+
+七个调用，覆盖读、查、填、点、再读。
+
+### 未发现缺陷
+
+第六个功能，第三次「通过」。**这一轮值得记的是操作纪律而不是缺陷**：`--user-data-dir` 隔离让「真跑一个有外部副作用的子系统」变成了一件安全的事 —— **下一次也可以用同样的办法跑 `computer`（但那个连屏幕，我仍会先问）。**
