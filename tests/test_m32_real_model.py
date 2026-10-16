@@ -156,6 +156,12 @@ def test_a_real_provider_reports_usage_and_a_finish_reason():
     result = asyncio.run(_call("What is 2 + 2? Reply with just the number.", ()))
 
     assert result.usage is not None, "the provider reported no usage"
+    # `prompt_tokens` is `int | None` on purpose: "the provider did not report
+    # it" is a different fact from "it was zero", and collapsing the two would
+    # make a missing count look like an empty prompt.
+    assert result.usage.prompt_tokens is not None, (
+        "the provider reported usage without a prompt token count"
+    )
     assert result.usage.prompt_tokens > 0
     assert result.finish_reason in {"stop", "length"}, result.finish_reason
 
