@@ -961,3 +961,152 @@ def test_a_pruned_message_differs_from_an_intact_one():
     assert "{removed}" in PRUNE_MARKER, (
         "the marker does not report how much was removed"
     )
+
+
+# ===========================================================================
+# M2.3: automatic compaction fires inside an open turn
+# ===========================================================================
+
+
+def build_over_threshold_scenario(tmp_path, *, window: int = 40_000):
+    """A session already past its threshold, and a runtime over it.
+
+    The history is pre-loaded rather than grown by the turn, because the trigger
+    condition is "the session is over threshold when a step begins". Growing it
+    during the turn would test a different thing -- the spill and prune stages,
+    which normally keep pressure from ever reaching this point, and do.
+    """
+    from arm.agent.loop import Runtime
+    from arm.context.compact import Thresholds
+    from arm.context.manager import ContextManager
+    from arm.context.prune import Pruner
+    from arm.context.spill import SpillStore
+    from arm.llm.mock import MockAdapter, text_response
+    from arm.prompt.assembler import PromptAssembler
+    from arm.tools.registry import ToolRegistry
+
+    assembler = PromptAssembler()
+    assembler.set("core", "you are arm", priority=10)
+    session = Session.create("m2-3")
+
+    for index in range(12):
+        session.append(
+            "user/message",
+            {
+                "message": {
+                    "role": "user",
+                    "content": [{"type": "text", "text": f"turn {index}: " + "x" * 3000}],
+                },
+                "surface_op": "append",
+            },
+        )
+        session.append(
+            "assistant/message",
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": f"reply {index}: " + "y" * 3000}],
+                },
+                "surface_op": "append",
+            },
+        )
+
+    async def summarize(_messages) -> str:
+        return "condensed history"
+
+    runtime = Runtime(
+        session,
+        MockAdapter([text_response("done")]),
+        ToolRegistry(),
+        assembler=assembler,
+        model="mock",
+    )
+    runtime.context = ContextManager(
+        session,
+        thresholds=Thresholds(
+            context_window=window,
+            headroom=0,
+            threshold_ratio=0.4,
+            retain_ratio=None,
+            retain_tokens=2_000,
+        ),
+        summarize=summarize,
+        spill=SpillStore(tmp_path / "spill"),
+        # High enough that spilling does not pre-empt compaction: this test is
+        # about the compaction path, not about spill being sufficient.
+        spill_threshold=500_000,
+        pruner=Pruner(head_chars=500, tail_chars=200),
+    )
+    return runtime, session
+
+
+def test_automatic_compaction_fires_within_an_open_turn(tmp_path):
+    """The contract's M2.3 item, which had no test.
+
+    "上游实测的两次压缩**都是手动 `/compact`**，自动路径只有源码依据" -- the
+    upstream project had never observed its own automatic path fire. Verified
+    here: it does, and `manual` is False, which is what distinguishes this from
+    the manual compactions every other test in this file exercises.
+    """
+    runtime, session = build_over_threshold_scenario(tmp_path)
+    assert runtime.context is not None
+    assert runtime.context.measured > runtime.context.thresholds.threshold_tokens, (
+        "the fixture is not actually over threshold, so this test would be vacuous"
+    )
+
+    runtime.submit("go")
+    asyncio.run(runtime.run_until_idle())
+
+    compactions = [e for e in session if e.type == "compaction/start"]
+    assert compactions, "automatic compaction never fired"
+    assert all(e.data.get("manual") is False for e in compactions), (
+        "a compaction was recorded as manual"
+    )
+
+
+def test_automatic_compaction_is_enclosed_by_a_single_turn(tmp_path):
+    """The other half of the contract's claim: "被同一轮包住".
+
+    A compaction that spanned a turn boundary would mean the lock was taken
+    before a turn ended and released after another began, so a crash in between
+    would leave a lock held against a turn that no longer exists.
+    """
+    runtime, session = build_over_threshold_scenario(tmp_path)
+    runtime.submit("go")
+    asyncio.run(runtime.run_until_idle())
+
+    types = [e.type for e in session]
+    starts = [i for i, t in enumerate(types) if t == "turn/start"]
+    ends = [i for i, t in enumerate(types) if t == "turn/end"]
+    compactions = [i for i, t in enumerate(types) if t == "compaction/start"]
+
+    assert compactions, "automatic compaction never fired"
+    for index in compactions:
+        enclosing = [
+            (s, e)
+            for s, e in zip(starts, ends)
+            if s < index < e
+        ]
+        assert len(enclosing) == 1, (
+            f"compaction at {index} is not enclosed by exactly one turn: "
+            f"turn boundaries were {list(zip(starts, ends))}"
+        )
+
+
+def test_the_turn_number_is_recorded_for_the_context_that_was_sent(tmp_path):
+    """The contract asks to confirm the turn is a number.
+
+    It is recorded on `request/context` -- which describes what was actually
+    sent, and therefore what the compaction produced -- rather than on
+    `compaction/start`, which describes the operation on its own.
+    """
+    runtime, session = build_over_threshold_scenario(tmp_path)
+    runtime.submit("go")
+    asyncio.run(runtime.run_until_idle())
+
+    contexts = [e for e in session if e.type == "request/context"]
+    assert contexts, "no request/context was recorded"
+    turns = [e.data.get("turn") for e in contexts]
+    assert all(isinstance(t, int) for t in turns), (
+        f"a turn number is not a number: {turns}"
+    )
