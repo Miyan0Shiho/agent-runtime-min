@@ -211,7 +211,17 @@
 1. ~~**【未验证】Python `asyncio` 能否承载 M3.8（取消不抛弃已启动的 promise）。**~~ **已验证（2026-10-16）**：`tests/test_m3_cancellation.py` 有 12 条测试覆盖这个契约项，其中 `test_naive_await_loses_the_side_effect` 先**复现朴素写法的失败**，`test_drain_lets_a_started_body_finish` 与 `test_cancelled_step_still_records_a_result_for_a_started_body` 断言契约要求的结果。
 
    **结论：能承载。** Python 的 `CancelledError` 在 `await` 点注入确实与 JS 的 `AbortSignal` 传播模型不同——这正是 `DrainScope` 存在的原因：它把已启动的 body 放进一个**拥有自己的排空流程**的 scope，使取消不会把它连同结果一起抛弃。
-2. **【未验证】`pydantic` 生成的 schema 是否满足模型侧的兼容性。** 上游对「原始 JSON Schema 子集」有明确边界(哪些关键字透传、哪些被校验)。`pydantic` 会生成 `$defs`/`anyOf` 等结构,模型未必都能正确理解。验证方法:用生成的 schema 跑一次真实工具调用,统计失败率。
+2. ~~**【未验证】`pydantic` 生成的 schema 是否满足模型侧的兼容性。**~~ **已用真实模型验证（2026-10-16，deepseek-chat）**：**兼容**。
+
+   **先纠正契约的一个前提**：这个风险比契约假设的低，因为工具参数是**手写的 JSON Schema**，不是从 pydantic 模型生成的。实测**没有任何 schema 出现 `$defs`/`anyOf`/`$ref`**——这正是不该出现的东西。已加测试固定这一点，这样「将来引入生成式 schema」是一个**可见的变更**而不是悄悄的。
+
+   真实往返验证通过：模型返回工具调用、参数类型正确；**`usage` 与 `finish_reason` 都被填充**（这两者曾被本项目丢弃，此处是对真实 provider 的端到端确认，而 FakeServer 无论如何都会发送它们，所以只有真实调用能证明）。
+
+   **一次测量方法的自我纠正**：我最初把「接受率」定义成「模型有没有调用我期望的那个工具」，测得 10/12，看起来像 16% 的 schema 失败。**它不是** ——`edit` 被跳过是因为模型**先读再改**，那是合理行为。当 `edit` 是唯一选项时它**每次都被选中**。
+
+   > **把「模型偏好另一个工具」当成「schema 被拒绝」会产出一个毫无意义的数字。** 这个区分已写进测试文件的 docstring。
+
+   测试在无 key 时 skip：`ARM_TEST_MODEL_KEY=... pytest tests/test_m32_real_model.py`。
 3. ~~**【未验证】`pre-execute` 瀑布的 `next()` 语义。**~~ **已定义并实现（2026-10-16）**：语义采用契约自己的建议——**不调 `next()` 即短路，后续监听器不运行**。`tests/test_m3_tool_pipeline.py::test_first_hook_denying_without_next_short_circuits` 就是那条负面测试。
 4. ~~**【推断】限制(restrict)与后续注册的时序缝。**~~ **已确认（2026-10-16）**，语义与契约推断一致，并已在代码里写明：`ToolRegistry.restrict` 的 docstring 说「`allow`/`deny` 针对**当下**存在的工具校验（M3.14），而**稍后注册的工具可以合法地被加进限制**」。
 

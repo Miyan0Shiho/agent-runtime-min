@@ -783,3 +783,40 @@ def test_the_two_mechanism_categories_are_present():
     categories = {case.category for case in default_cases()}
     assert "long-session" in categories, "M2's acceptance has no case to measure it"
     assert "fault-recovery" in categories, "M3's acceptance has no case to measure it"
+
+
+def test_the_fixture_cost_is_far_below_the_contract_threshold():
+    """M4.4 asked whether self-contained cases would bloat the repository.
+
+    Measured: 18 cases carry 31 fixture files totalling ~12.5 KiB, against a
+    contract threshold of 50 MB -- about four thousand times under.
+
+    The reason is that fixtures are **inline strings in the case definitions**
+    rather than files on disk. A case's setup is written in Python next to the
+    task it describes, so it costs source bytes and not repository artifacts.
+    That is why the concern does not arise: there is nothing to grow.
+
+    This test will fail if a future case embeds something large -- a captured log,
+    a binary blob -- at which point the contract's "按需生成" fallback becomes the
+    right answer.
+    """
+    from arm.eval.cases import default_cases
+
+    cases = default_cases()
+    total = sum(
+        len(content)
+        for case in cases
+        for content in (case.setup or {}).values()
+    )
+    files = sum(len(case.setup or {}) for case in cases)
+
+    assert total < 50 * 1024 * 1024, (
+        f"fixtures total {total / 1024 / 1024:.1f} MB against a 50 MB threshold"
+    )
+    # A much tighter bound than the contract's, because the measured value is
+    # tiny and a jump to even a megabyte would mean something changed shape.
+    assert total < 1024 * 1024, (
+        f"fixtures grew to {total / 1024:.1f} KiB; measured 12.5 KiB at 18 cases, "
+        "so something large was added"
+    )
+    assert files > 0, "no case has a fixture, so this test measures nothing"
