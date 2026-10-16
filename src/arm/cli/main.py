@@ -407,6 +407,11 @@ def build_runtime(
             approval=approval,
             sandbox=sandbox,
             delegation_tool_factory=delegation_tool,
+            # Children are persisted alongside the root, so the session id the
+            # model is handed actually resolves. Measured before this: a teammate
+            # created a file, the lead's log recorded the child's id, and no log
+            # for that id existed -- `arm sessions` listed only the root.
+            session_dir=str(session_dir(home)) if persist else None,
         )
     )
     registry.register(delegation_tool(session, 0))

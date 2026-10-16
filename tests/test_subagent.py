@@ -426,7 +426,9 @@ def test_consumed_work_counts_turns():
 # ===========================================================================
 
 
-def build_runtime_with_child(script, *, depth: int = 0, max_depth: int = DEFAULT_MAX_DEPTH):
+def build_runtime_with_child(
+    script, *, depth: int = 0, max_depth: int = DEFAULT_MAX_DEPTH, session_dir=None
+):
     """A runtime whose children are real loops driven by a scripted model."""
     from arm.agent.loop import Runtime
     from arm.llm.mock import MockAdapter
@@ -447,7 +449,11 @@ def build_runtime_with_child(script, *, depth: int = 0, max_depth: int = DEFAULT
 
     runtime = SubagentRuntime(registry=registry, max_depth=max_depth)
     runtime.register_provider(
-        InProcessProvider(factory=ChildFactory(build=build), parent_registry=registry)
+        InProcessProvider(
+            factory=ChildFactory(build=build),
+            parent_registry=registry,
+            session_dir=session_dir,
+        )
     )
     return runtime
 
@@ -1231,3 +1237,123 @@ def test_the_schema_instruction_is_valid_json_when_parsed_out():
     end = instruction.rindex("}") + 1
     parsed = jsonlib.loads(instruction[start:end])
     assert parsed == schema, "the schema was not rendered faithfully"
+
+
+# ===========================================================================
+# A child's transcript must be persisted and reconstructable
+# ===========================================================================
+
+
+def test_a_child_session_is_written_to_its_own_log(tmp_path):
+    """A delegated run's work was not recorded anywhere.
+
+    Measured by running a real delegation and asking where it went: the teammate
+    created a file, the lead's log recorded the child's *session id*, and no log
+    for that id existed. The runtime handed the model a reference it could not
+    resolve -- `arm sessions` listed only the root.
+
+    M1 says what the model can see is recorded. A child is a model whose output
+    the parent acts on, so its transcript is part of the record; without this, the
+    most interesting work -- delegated work -- was the work with no transcript.
+    """
+    import asyncio
+
+    from arm.llm.mock import text_response
+    from arm.subagent.contracts import DelegationRequest
+
+    runtime = build_runtime_with_child(
+        [text_response("the child's answer")], session_dir=tmp_path
+    )
+    parent = Session.create("parent")
+
+    result = asyncio.run(
+        runtime.run(DelegationRequest(prompt="do the thing"), parent=parent)
+    )
+
+    logs = list(tmp_path.glob("*.jsonl"))
+    assert logs, "no child log was written"
+    assert result.child_session in logs[0].name, (
+        f"the log {logs[0].name} does not match the id the result reports "
+        f"({result.child_session})"
+    )
+
+
+def test_the_child_log_is_contiguous_and_rehydrates(tmp_path):
+    """The check the first attempt was missing.
+
+    My first version attached a listener and stopped there. `Session.create` has
+    already written `session/start` and `session/end-seed` by then, and a listener
+    only sees what happens after it subscribes -- so the file began at seq 2 and
+    the reader refused it:
+
+        LogCorruptionError: stored log is not contiguous: expected seq 0, found 2
+
+    The file *existed*, which is why the omission looked like success. Reading it
+    back is what found it, so that is what this test does.
+    """
+    import asyncio
+
+    from arm.llm.mock import text_response
+    from arm.session.persistence import read_log
+    from arm.session.session import Session as _Session
+    from arm.subagent.contracts import DelegationRequest
+
+    runtime = build_runtime_with_child(
+        [text_response("the child's answer")], session_dir=tmp_path
+    )
+    parent = Session.create("parent")
+    asyncio.run(runtime.run(DelegationRequest(prompt="do the thing"), parent=parent))
+
+    logs = list(tmp_path.glob("*.jsonl"))
+    assert logs, "no child log was written"
+
+    # Raises LogCorruptionError if the log does not start at seq 0 and run on.
+    restored = read_log(logs[0])
+    assert restored.events, "the child log is empty"
+    assert [e.seq for e in restored.events] == list(range(len(restored.events)))
+
+    # And it reconstructs the child's own conversation.
+    session = _Session.from_events("check", restored.events)
+    roles = [m.role for m in session.derive()]
+    assert "assistant" in roles, f"the child's answer is not recoverable: {roles}"
+
+
+def test_a_child_log_records_the_lineage(tmp_path):
+    """The parent link is on the child, so the tree is walkable from either end."""
+    import asyncio
+
+    from arm.llm.mock import text_response
+    from arm.session.persistence import read_log
+    from arm.subagent.contracts import DelegationRequest
+
+    runtime = build_runtime_with_child(
+        [text_response("answer")], session_dir=tmp_path
+    )
+    parent = Session.create("parent")
+    asyncio.run(runtime.run(DelegationRequest(prompt="do it"), parent=parent))
+
+    log = next(tmp_path.glob("*.jsonl"))
+    restored = read_log(log)
+    header = restored.events[0].data.get("header") or {}
+    assert header.get("parent_session") == "parent", (
+        f"the child log does not name its parent: {header}"
+    )
+
+
+def test_no_session_dir_means_no_child_logs(tmp_path):
+    """Not persisting children is a choice a caller can make.
+
+    Asserted so the behaviour is a decision rather than an accident of a default.
+    """
+    import asyncio
+
+    from arm.llm.mock import text_response
+    from arm.subagent.contracts import DelegationRequest
+
+    runtime = build_runtime_with_child([text_response("answer")])
+    parent = Session.create("parent")
+    asyncio.run(runtime.run(DelegationRequest(prompt="do it"), parent=parent))
+
+    assert not list(tmp_path.glob("*.jsonl")), (
+        "children were persisted even though no directory was given"
+    )

@@ -24,12 +24,15 @@ not a second agent to manage.
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 import logging
+import os
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping
 
 from ..approval.service import ApprovalService
 from ..kernel.errors import describe
+from ..session.persistence import JsonlLog
 from ..session.session import Session
 from ..tools.registry import ToolRegistry
 from .contracts import (
@@ -85,11 +88,21 @@ class InProcessProvider:
         approval: ApprovalService | None = None,
         sandbox: Any = None,
         delegation_tool_factory: Callable[[Any, int], Any] | None = None,
+        session_dir: str | os.PathLike[str] | None = None,
     ) -> None:
         self.factory = factory
         self.parent_registry = parent_registry
         self.approval = approval
         self.sandbox = sandbox
+        #: Where a child's transcript is written. Injected rather than derived:
+        #: the subagent layer should not know where a deployment keeps sessions,
+        #: and a test wants to write to a temporary directory.
+        #:
+        #: ``None`` means children are not persisted, which is the honest state
+        #: for a caller that did not ask for it -- not a silent default.
+        self.session_dir = session_dir
+        #: Open logs, kept so they are flushed and closed when the provider is.
+        self._child_logs: list[Any] = []
         #: Builds the child's own ``subagent`` tool at the child's depth. Without
         #: it a child inherits the parent's tool, whose depth is baked in at 0,
         #: and the depth limit never triggers.
@@ -104,11 +117,52 @@ class InProcessProvider:
         building it is reported as a start failure rather than as a run that
         produced no result.
         """
-        child_session = Session.create(f"subagent-{run_id[:8]}")
-        # The link back to the parent is recorded on the child, so the lineage is
-        # inspectable without the runtime keeping a side table.
-        child_session.header["parent_session"] = parent.session_id
-        child_session.header["delegated"] = True
+        # The link back to the parent is recorded *at creation*, so it lands in
+        # the child's `session/start` event. Setting it afterwards mutates the
+        # object and never reaches the log -- which is how the lineage came back
+        # empty when read from the file that is supposed to hold it.
+        child_session = Session.create(
+            f"subagent-{run_id[:8]}",
+            header={"parent_session": parent.session_id, "delegated": True},
+        )
+
+        # A child's work is recorded like anyone else's.
+        #
+        # Found by running a real delegation and then asking where it went: the
+        # teammate created a file, the lead's log recorded the child's *session
+        # id*, and no log for that id existed. The runtime handed the model a
+        # reference it could not resolve -- `arm sessions` listed only the root.
+        #
+        # M1's claim is that what the model can see is recorded. A child is a
+        # model whose output the parent acts on, so its transcript is part of the
+        # record; the alternative is a runtime where the most interesting work
+        # (delegated work) is the work with no transcript.
+        #
+        # The directory is injected rather than derived here, because the
+        # subagent layer should not know where a deployment keeps its sessions.
+        if self.session_dir is not None:
+            try:
+                handle = JsonlLog(
+                    Path(self.session_dir) / f"{child_session.session_id}.jsonl"
+                ).open()
+            except OSError as exc:  # a log that cannot be opened must not stop the run
+                log.warning("could not open a log for %s: %s", child_session.session_id, exc)
+            else:
+                # The events already in the session are written first. A listener
+                # only sees what happens *after* it subscribes, and `Session.create`
+                # has already written `session/start` and `session/end-seed` -- so
+                # attaching alone produced a log beginning at seq 2, which the
+                # reader correctly refused as non-contiguous:
+                #
+                #     LogCorruptionError: stored log is not contiguous:
+                #     expected seq 0, found 2
+                #
+                # Caught by reading back the very log this change creates, which
+                # is the check that was missing from the first attempt: the file
+                # existed, so it looked like the fix worked.
+                handle.append(list(child_session.events()), already_contiguous=True)
+                child_session.listen(_make_persister(handle))
+                self._child_logs.append(handle)
 
         # A layered view: the child sees the parent's tools minus anything the
         # request excludes, and the runtime re-registers the subagent tool with a
@@ -394,6 +448,19 @@ class InProcessProvider:
                     events=len(child_session),
                 )
             )
+
+
+def _make_persister(handle: Any):
+    """A listener that writes a child's committed events to its own log.
+
+    Shaped like the CLI's root persister, for the same reason: a listener's
+    return value is discarded, so returning anything would imply otherwise.
+    """
+
+    def persist(_session: Any, event: Any) -> None:
+        handle.append([event], already_contiguous=True)
+
+    return persist
 
 
 def _schema_instruction(schema: Mapping[str, Any]) -> str:

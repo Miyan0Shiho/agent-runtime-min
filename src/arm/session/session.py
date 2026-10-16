@@ -158,7 +158,21 @@ class Session:
     ) -> "Session":
         """Start a fresh session, writing the two session-scope events."""
         session = cls(session_id, header=header)
-        session.append(SESSION_START, {"session_id": session_id})
+        # The header goes into the event, not just onto the object.
+        #
+        # Found by reading back a subagent's log to check the lineage and finding
+        # it empty: `header` was stored on the Session and `session/start` was
+        # written with only the id, so a value set here was never recorded. The
+        # session knew its parent; the log -- which is supposed to be the record --
+        # did not.
+        #
+        # It matters for children specifically, because the parent link is what
+        # makes a delegation tree walkable from the log alone. Reconstructing it
+        # from anything else would mean the log was not sufficient.
+        start: dict[str, Any] = {"session_id": session_id}
+        if header:
+            start["header"] = dict(header)
+        session.append(SESSION_START, start)
         session.append(SESSION_END_SEED, {})
         return session
 
