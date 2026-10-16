@@ -28,6 +28,8 @@ parse reports the problem where it can be seen.
 
 from __future__ import annotations
 
+import hashlib
+
 import json
 import logging
 import re
@@ -286,6 +288,24 @@ class HookHandler:
             raise HookError("a hook needs a command")
         if self.timeout_ms <= 0:
             raise HookError("a hook timeout must be positive")
+
+        # The identifier is derived when the caller did not supply one, so every
+        # handler has an identity regardless of how it was constructed.
+        #
+        # The config loader assigns `dialect:point:n`, but a handler built by
+        # hand -- in a test, or by an embedding application -- got the empty
+        # string. That showed up when a deny needed to record *which* hook
+        # refused: the one construction path that did not come from the loader
+        # was also the one path with nothing to report.
+        #
+        # Derived from what the handler *is* rather than from where it came from,
+        # so two identical handlers are indistinguishable on purpose and two
+        # different ones never collide.
+        if not self.handler_id:
+            digest = hashlib.sha256(
+                "\x00".join((self.point, self.command, *self.args)).encode("utf-8")
+            ).hexdigest()[:8]
+            object.__setattr__(self, "handler_id", f"{self.point}:{digest}")
 
 
 def parse_config(

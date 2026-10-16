@@ -74,6 +74,22 @@ class HookBridge:
             },
         )
 
+    def last_denier(self) -> str:
+        """Which hook produced the most recent deny, or an empty string.
+
+        Read from the outcomes the runner already keeps. Returned as a plain
+        identifier rather than the outcome object, so a caller records a string
+        and does not hold a reference into the runner.
+        """
+        for outcome in reversed(self.runner.outcomes):
+            if outcome.decision.kind == DECISION_DENY:
+                # `HookHandler` derives an id when one is not supplied, so this
+                # is non-empty for any handler that reached the runner -- a
+                # hand-built one included. It was empty only while the loader was
+                # the sole source of ids.
+                return outcome.handler_id
+        return ""
+
     async def post_tool(
         self, tool_name: str, arguments: Mapping[str, Any], result: str,
         *, is_error: bool,
@@ -218,7 +234,16 @@ def pipeline_hook(bridge: HookBridge):
         )
         if decision.kind == DECISION_DENY:
             # Short-circuit: do not call next_, which is what a waterfall means.
-            return _deny(decision.reason or "a hook denied this tool call")
+            return _deny(
+                decision.reason or "a hook denied this tool call",
+                # Which hook said so. Found by running a denying hook for real:
+                # the runtime knew the identity (`claude-code:PreToolUse:1`) and
+                # the log recorded only `code: DENIED`, so with more than one
+                # hook configured a reader could not tell which one blocked the
+                # call. The same reasoning as M3.10 -- an identity that exists
+                # should persist, and it is not what the model reads.
+                bridge.last_denier(),
+            )
         if decision.kind == DECISION_ASK:
             return _ask(decision.reason)
         return await next_()
@@ -226,10 +251,10 @@ def pipeline_hook(bridge: HookBridge):
     return pre_execute
 
 
-def _deny(reason: str) -> Any:
+def _deny(reason: str, handler_id: str = "") -> Any:
     from ..tools.pipeline import Decision as PipelineDecision
 
-    return PipelineDecision.deny(reason)
+    return PipelineDecision.deny(reason, hook=handler_id)
 
 
 def _ask(reason: str) -> Any:

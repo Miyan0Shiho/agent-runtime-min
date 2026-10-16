@@ -90,14 +90,20 @@ class Decision:
 
     kind: str  # "allow" | "deny" | "cancel" | "ask"
     reason: str = ""
+    #: Which policy stage produced this decision, when one is identifiable.
+    #:
+    #: Recorded so a blocked call names its blocker. With several pre-execute
+    #: stages in play -- hooks, approval, sandbox -- "DENIED" alone leaves a
+    #: reader unable to tell which of them refused, and the runtime knew.
+    hook: str = ""
 
     @staticmethod
     def allow() -> "Decision":
         return Decision(kind="allow")
 
     @staticmethod
-    def deny(reason: str) -> "Decision":
-        return Decision(kind="deny", reason=reason)
+    def deny(reason: str, *, hook: str = "") -> "Decision":
+        return Decision(kind="deny", reason=reason, hook=hook)
 
     @staticmethod
     def cancel(reason: str = "") -> "Decision":
@@ -346,7 +352,15 @@ class ToolPipeline:
         if decision.kind == "deny":
             return self._finalize(
                 execution,
-                ToolResult.fail(decision.reason or "denied", code=CODE_DENIED),
+                ToolResult.fail(
+                    decision.reason or "denied",
+                    code=CODE_DENIED,
+                    # Which stage refused. It goes in `info`, which persists in
+                    # the log and stays out of what the model reads -- the same
+                    # split M3.10 requires, for the same reason: the model needs
+                    # the message, a reader needs the identity.
+                    info={"denied_by": decision.hook} if decision.hook else None,
+                ),
             )
         if decision.kind == "cancel":
             return self._finalize(

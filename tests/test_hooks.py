@@ -1347,3 +1347,148 @@ def test_every_hook_point_is_consulted_somewhere():
         "these hook points are defined but never consulted, so a hook installed "
         f"for them would silently do nothing: {missing}"
     )
+
+
+# ===========================================================================
+# A blocked call must name its blocker
+# ===========================================================================
+
+
+def test_a_deny_records_which_hook_refused(tmp_path: Path):
+    """Found by running a denying hook for real.
+
+    The runtime knew the identity (`claude-code:PreToolUse:1`) and the log
+    recorded only `code: DENIED`. With more than one hook configured -- which is
+    the normal case, since a project adds them one at a time -- a reader of the
+    log could not tell which one blocked the call, and could not tell a hook
+    denial from the approval service's.
+
+    The same split as M3.10: the model gets the message, the log gets the
+    identity.
+    """
+    import asyncio
+
+    from arm.hooks.bridge import HookBridge
+    from arm.hooks.protocol import POINT_PRE_TOOL, HookHandler
+    from arm.hooks.runner import HookRunner
+    from arm.tools.pipeline import Decision as PipelineDecision
+
+    command, args = script(
+        tmp_path,
+        """
+        import sys
+        sys.stderr.write("not allowed here")
+        sys.exit(2)
+        """,
+    )
+    handler = HookHandler(point=POINT_PRE_TOOL, command=command, args=tuple(args))
+    bridge = HookBridge(HookRunner([handler]))
+
+    decision = asyncio.run(bridge.pre_tool("write", {"path": "x.txt"}))
+
+    assert decision.kind == "deny", decision
+
+    denier = bridge.last_denier()
+    assert denier, "the bridge does not report which hook denied"
+    # It must identify the handler, not merely be a non-empty string. My first
+    # version asserted only truthiness, which passed even with the id derivation
+    # removed -- the string was non-empty for another reason.
+    # Asserted as a *shape*, not as equality with `handler.handler_id` -- that
+    # comparison is vacuous when the derivation is missing, because both sides
+    # become the empty string and `"" == ""` passes. A test that compares a value
+    # to its own source cannot detect that source being empty.
+    assert ":" in denier, (
+        f"the denier {denier!r} does not identify a handler; an unnamed one "
+        "would be indistinguishable from another hook at the same point"
+    )
+    assert denier == handler.handler_id
+    # And it survives being carried on a pipeline decision.
+    assert PipelineDecision.deny("r", hook=denier).hook == denier
+
+
+def test_the_denier_reaches_the_tool_result(tmp_path: Path):
+    """The identity must persist with the result, not just live in the runner."""
+    import asyncio
+
+    from arm.agent.loop import Runtime
+    from arm.hooks.bridge import HookBridge
+    from arm.hooks.protocol import POINT_PRE_TOOL, HookHandler
+    from arm.hooks.runner import HookRunner
+    from arm.llm.mock import MockAdapter, text_response, tool_response
+    from arm.prompt.assembler import PromptAssembler
+    from arm.session.session import Session
+    from arm.tools.builtin import builtin_tools
+    from arm.tools.registry import ToolRegistry
+
+    command, args = script(
+        tmp_path,
+        """
+        import json, sys
+        json.load(sys.stdin)
+        sys.stderr.write("blocked by project policy")
+        sys.exit(2)
+        """,
+    )
+    bridge = HookBridge(
+        HookRunner(
+            [HookHandler(point=POINT_PRE_TOOL, command=command, args=tuple(args))]
+        )
+    )
+
+    registry = ToolRegistry()
+    registry.register_many(builtin_tools())
+    assembler = PromptAssembler()
+    assembler.set("core", "arm", priority=10)
+    session = Session.create("deny")
+    loop = Runtime(
+        session,
+        MockAdapter(
+            [
+                tool_response(("c1", "write", {"path": "x.txt", "content": "hi"})),
+                text_response("ok"),
+            ]
+        ),
+        registry,
+        assembler=assembler,
+        hook_bridge=bridge,
+        model="m",
+    )
+    loop.submit("write it")
+    asyncio.run(loop.run_until_idle())
+
+    results = [e for e in session if e.type == "tool/result"]
+    assert results, "no tool result was recorded"
+    result = results[0]
+    assert result.data["is_error"] is True
+
+    info = result.data.get("info") or {}
+    assert info.get("code") == "DENIED", info
+    denier = (info.get("error") or {}).get("denied_by")
+    assert denier, f"the log does not name the denying hook: {info}"
+
+    # And the identity stays out of what the model reads.
+    content = result.data["message"]["content"][0]["text"]
+    assert denier not in content, (
+        f"the hook identity leaked into the model's content: {content!r}"
+    )
+
+
+def test_an_allow_records_no_denier(tmp_path: Path):
+    """Nothing denied, so nothing to name."""
+    import asyncio
+
+    from arm.hooks.bridge import HookBridge
+    from arm.hooks.protocol import POINT_PRE_TOOL, HookHandler
+    from arm.hooks.runner import HookRunner
+
+    command, args = script(tmp_path, "print('{}')")
+    bridge = HookBridge(
+        HookRunner(
+            [HookHandler(point=POINT_PRE_TOOL, command=command, args=tuple(args))]
+        )
+    )
+
+    decision = asyncio.run(bridge.pre_tool("write", {"path": "x.txt"}))
+
+    assert decision.kind == "allow", decision
+    assert bridge.last_denier() == "", "a denier was reported for an allow"
