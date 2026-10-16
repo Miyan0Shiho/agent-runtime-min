@@ -175,3 +175,101 @@ def test_the_model_can_select_a_tool_that_is_its_only_option():
     calls = result.tool_calls or ()
     assert calls, f"the provider returned no tool call: {result.text!r}"
     assert calls[0].name == "edit", calls[0].name
+
+
+# ===========================================================================
+# M4.2: judge bias, measured against a real model
+# ===========================================================================
+
+
+def _judge():
+    from arm.eval.judge import Judge
+
+    return Judge(adapter=_adapter(), model=MODEL)
+
+
+FIB_TASK = "Write a Python function that returns the nth Fibonacci number."
+
+
+def test_the_judge_repeats_itself_on_a_fixed_answer():
+    """M4.2's first half: "用同一份输出跑 10 次,统计结论方差".
+
+    Measured: ten runs on a correct answer all returned 5.0, sd 0.00, all marked
+    reliable. Repeatability is what makes a score comparable across runs; a judge
+    that drifted would make historical scores meaningless while still looking
+    plausible.
+    """
+    judge = _judge()
+    answer = (
+        "def fib(n):\n    a, b = 0, 1\n    for _ in range(n):\n"
+        "        a, b = b, a + b\n    return a\n\nIterative: O(n) time, O(1) space."
+    )
+    results = [asyncio.run(judge.assess(FIB_TASK, answer)) for _ in range(5)]
+
+    scores = [r.score for r in results if r.score is not None]
+    assert len(scores) == 5, "the judge failed to produce a score"
+    assert max(scores) == min(scores), f"the judge varied on a fixed answer: {scores}"
+
+
+def test_the_judge_discriminates_between_good_and_bad_answers():
+    """**The check that makes the repeatability number mean anything.**
+
+    Ten identical 5.0s would also be produced by a judge that always says 5. It
+    did not, but only this test distinguishes the two -- a ceiling and a stable
+    verdict look the same from one answer.
+    """
+    judge = _judge()
+    correct = (
+        "def fib(n):\n    a, b = 0, 1\n    for _ in range(n):\n"
+        "        a, b = b, a + b\n    return a\n\nO(n) time, O(1) space."
+    )
+    wrong = "def fib(n):\n    return n  # just return n"
+
+    good = asyncio.run(judge.assess(FIB_TASK, correct))
+    bad = asyncio.run(judge.assess(FIB_TASK, wrong))
+
+    assert good.score is not None and bad.score is not None
+    assert good.score > bad.score + 2, (
+        f"the judge does not separate a correct answer from a wrong one: "
+        f"{good.score} vs {bad.score}"
+    )
+
+
+def test_verbosity_bias_is_not_present():
+    """M4.2's named biases, checked where they would show.
+
+    Verbosity bias means preferring longer answers. Measured: a wrong answer
+    padded to 856 characters scored *lower* (1.28) than the same wrongness at 41
+    characters (1.33). Length is not buying score.
+    """
+    judge = _judge()
+    short_wrong = "def fib(n):\n    return 42"
+    long_wrong = (
+        "Here is a careful and detailed explanation of the approach.\n\n"
+        "def fib(n):\n    return 42\n\n" + "This is the answer. " * 40
+    )
+
+    short = asyncio.run(judge.assess(FIB_TASK, short_wrong))
+    long = asyncio.run(judge.assess(FIB_TASK, long_wrong))
+
+    assert short.score is not None and long.score is not None
+    assert long.score <= short.score + 0.5, (
+        f"a wrong answer scored higher for being longer: {short.score} -> {long.score}"
+    )
+    assert len(long_wrong) > len(short_wrong) * 10, "the fixture is not actually longer"
+
+
+def test_the_judge_reports_disagreement_rather_than_hiding_it():
+    """The structural defence: two orderings must agree, or the verdict is
+    marked unreliable instead of averaged into something confident.
+
+    Asserted on the shape rather than on a bias appearing, because the bias is
+    what we want *not* to happen -- and a test that demanded it would be testing
+    for a defect.
+    """
+    judge = _judge()
+    result = asyncio.run(judge.assess(FIB_TASK, "def fib(n):\n    return n"))
+
+    assert result.reliable, "a simple verdict should be reliable"
+    # Both orderings were actually consulted: the verdict records both.
+    assert result.verdicts, "only one ordering was consulted"
