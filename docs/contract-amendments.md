@@ -1346,3 +1346,39 @@ status            -> active → inactive（这就是回执）
 | 只投递最近一次的错过 | 属实——**六年错过 → 一次投递** |
 
 **明确写下的代价，比假装没有代价更有用**——这一轮我逐条验证了它们，没有一条被夸大。
+
+---
+
+## 47. Worktree 真跑验证：**通过**（本轮无缺陷）
+
+第五个真跑的功能。三条工具全部真跑，且**没有一个缺陷**。
+
+### 实测
+
+| 操作 | 结果 |
+|---|---|
+| `worktree_create probe-wt` | ✅ 建在 `<repo>/../.agent-runtime-min-worktrees/probe-wt`，分支 `arm/probe-wt` |
+| `worktree_list` | ✅ 列出主检出 + linked worktree，带 clean 状态 |
+| `worktree_remove` | ✅ 删除，之后 `git worktree list` 只剩主检出 |
+| `delete_branch: true` | ✅ 分支 `arm/wt2` 确实消失（模型**先确认它存在过**再删——这是对的实验方法） |
+| **安全拒绝** | ✅ 有未提交改动时**拒绝删除**，报出改动数量，**文件还在**；`force=True` 才覆盖 |
+
+### 两处「看起来像缺陷」但我核对后**不是**
+
+**① 分支被留下。** 模型的观察是对的（`arm/probe-wt` 还在），但这**是文档化行为**：`remove(delete_branch=False)` 是默认值，工具也**确实暴露了** `delete_branch` 参数并**正确透传** —— 只是那次调用没传。用 `delete_branch: true` 再跑一次，分支干净消失。
+
+> **「参数没被用」和「参数没被接」是两回事。** 我先怀疑后者，查了 `WorktreeRemoveParams` 和 body 的透传，确认是前者。
+
+**② 工作树根目录留下一个空目录。** `mkdir(parents=True)` 创建后**从不删除**。核对后认为**不是缺陷**：
+
+- 代价：每个仓库留一个空目录；
+- 删它的代价：**竞态** —— 若在另一个 `worktree_create` 启动时删掉共享父目录，`mkdir` 会失败；
+- 而 `create()` 用的是 `mkdir(parents=True, exist_ok=True)`，**不需要它存在**。
+
+> **删掉一个不是自己独占的共享父目录，比留一个空目录更糟。** git 自己也不删 `.git`。
+
+### 已有测试覆盖
+
+这次**不需要补测试**：安全拒绝（`test_removal_refuses_when_there_are_uncommitted_changes`）、force 覆盖、`delete_branch`（含**通过工具**的路径）**都已经有测试**。
+
+> **「不需要改动」是一个需要核实后才能得出的结论**，不是「没什么可说的」。我逐条查了参数透传、根目录清理、以及测试覆盖，才敢写「通过」。
