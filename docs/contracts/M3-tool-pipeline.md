@@ -208,9 +208,13 @@
 
 ## 11. 未解决 / 待验证
 
-1. **【未验证】Python `asyncio` 能否承载 M3.8(取消不抛弃已启动的 promise)。** Python 的 `CancelledError` 会在 `await` 点注入,与 JS 的 `AbortSignal` 传播模型不同。验证方法:M3 实现后写一条测试——取消一个已启动的工具主体,断言它仍走完并落结果。
+1. ~~**【未验证】Python `asyncio` 能否承载 M3.8（取消不抛弃已启动的 promise）。**~~ **已验证（2026-10-16）**：`tests/test_m3_cancellation.py` 有 12 条测试覆盖这个契约项，其中 `test_naive_await_loses_the_side_effect` 先**复现朴素写法的失败**，`test_drain_lets_a_started_body_finish` 与 `test_cancelled_step_still_records_a_result_for_a_started_body` 断言契约要求的结果。
+
+   **结论：能承载。** Python 的 `CancelledError` 在 `await` 点注入确实与 JS 的 `AbortSignal` 传播模型不同——这正是 `DrainScope` 存在的原因：它把已启动的 body 放进一个**拥有自己的排空流程**的 scope，使取消不会把它连同结果一起抛弃。
 2. **【未验证】`pydantic` 生成的 schema 是否满足模型侧的兼容性。** 上游对「原始 JSON Schema 子集」有明确边界(哪些关键字透传、哪些被校验)。`pydantic` 会生成 `$defs`/`anyOf` 等结构,模型未必都能正确理解。验证方法:用生成的 schema 跑一次真实工具调用,统计失败率。
-3. **【未验证】`pre-execute` 瀑布的 `next()` 语义。** 上游自己也没验证「第一个监听器不调 `next()` 直接返回 deny 时,第二个是否运行」。我们需要**先定义清楚**再实现。建议:明确定义为「不调 `next()` 即短路,后续监听器不运行」,并写负面测试。
-4. **【推断】限制(restrict)与后续注册的时序缝。** 上游的 `restrict` 只校验**当下**的可过滤名字,而准入是运行期现算。所以「allow 列表里放一个稍后才注册的工具」应当合法。这个语义是否可接受,需在实现时确认。
+3. ~~**【未验证】`pre-execute` 瀑布的 `next()` 语义。**~~ **已定义并实现（2026-10-16）**：语义采用契约自己的建议——**不调 `next()` 即短路，后续监听器不运行**。`tests/test_m3_tool_pipeline.py::test_first_hook_denying_without_next_short_circuits` 就是那条负面测试。
+4. ~~**【推断】限制(restrict)与后续注册的时序缝。**~~ **已确认（2026-10-16）**，语义与契约推断一致，并已在代码里写明：`ToolRegistry.restrict` 的 docstring 说「`allow`/`deny` 针对**当下**存在的工具校验（M3.14），而**稍后注册的工具可以合法地被加进限制**」。
+
+   理由：校验的是 **allow 条目**（一个什么都没指到的名字是静默的配置错误），而**准入是每次调用现算的**。实测：`restrict(allow=['read'])` 之后注册 `later`，`later` 可被取到。已加测试固定这个语义。
 5. **【未验证】超时与取消的优先级。** 上游区分「超时策略自己的计时器命中」与「外层嵌套 deadline 先命中」,后者不替换为 `TOOL_TIMEOUT`。我们的实现是否需要这层区分,取决于是否支持嵌套 deadline。
 6. **【未验证】M3.10 的「结构化错误身份不进模型内容」在自用场景下的价值。** 上游需要它是因为有遥测与 UI;我们的第一版没有消费者。触发条件:引入 M4 的 trace 评估时,该信息会成为评估输入——届时必须实现。
