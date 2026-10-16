@@ -1619,3 +1619,105 @@ def test_a_restriction_naming_nothing_is_refused():
     assert "typo-that-names-nothing" in str(info.value), (
         "the refusal does not say which name was wrong, so it cannot be acted on"
     )
+
+
+# ===========================================================================
+# M3.10: structured error identity persists, but never reaches the model
+# ===========================================================================
+
+
+def _run_one_call(tool_name: str, arguments: dict):
+    """Run a single tool call through a real loop and return the tool/result."""
+    import asyncio
+
+    from arm.agent.loop import Runtime
+    from arm.llm.mock import MockAdapter, text_response, tool_response
+    from arm.prompt.assembler import PromptAssembler
+    from arm.session.session import Session
+    from arm.tools.builtin import builtin_tools
+    from arm.tools.registry import ToolRegistry
+
+    registry = ToolRegistry()
+    registry.register_many(builtin_tools())
+    assembler = PromptAssembler()
+    assembler.set("core", "you are arm", priority=10)
+    session = Session.create("m3-10")
+    loop = Runtime(
+        session,
+        MockAdapter(
+            [tool_response(("c1", tool_name, arguments)), text_response("ok")]
+        ),
+        registry,
+        assembler=assembler,
+        model="m",
+    )
+    loop.submit("go")
+    asyncio.run(loop.run_until_idle())
+    return next(e for e in session if e.type == "tool/result")
+
+
+def test_a_failure_records_a_structured_error_identity():
+    """M3.10: "结构化错误身份随结果持久化，但永不进模型内容".
+
+    **The contract conditioned this on a trigger that has now arrived**: "引入 M4
+    的 trace 评估时，该信息会成为评估输入". Traces are recorded and evaluated, and
+    a trace saying only `is_error: true` cannot tell a missing file from a
+    permission denial without re-running the call -- which is what a trace exists
+    to avoid.
+
+    Measured before the fix: `error_info` was built by `ToolResult.fail`, carried
+    through the pipeline's projection step, and then **dropped by the loop**, so
+    it existed in memory for one call and nowhere after. And no tool passed it at
+    all, so even threading it through would have changed nothing.
+    """
+    result = _run_one_call("read", {"path": "/definitely/not/a/real/file"})
+
+    info = result.data.get("info") or {}
+    assert info.get("code") == "TOOL_NOT_FOUND", info
+    identity = info.get("error") or {}
+    assert identity.get("kind") == "missing", (
+        f"the structured identity did not persist: {info}"
+    )
+    assert identity.get("path") == "/definitely/not/a/real/file"
+
+
+def test_the_structured_identity_does_not_reach_the_model():
+    """The other half, and the reason it is stored separately.
+
+    Internal detail in the model's context leaks implementation and invites the
+    model to reason about paths it cannot act on. The model gets the message; the
+    trace gets the identity.
+    """
+    result = _run_one_call("read", {"path": "/definitely/not/a/real/file"})
+
+    content = result.data["message"]["content"][0]["text"]
+    assert "not found" in content, content
+    # The structured field name must not appear in what the model reads.
+    assert "kind" not in content, (
+        f"the structured identity leaked into the model's content: {content!r}"
+    )
+    assert "TOOL_NOT_FOUND" not in content, (
+        f"the error code leaked into the model's content: {content!r}"
+    )
+
+
+def test_different_failures_are_distinguishable_from_the_log_alone():
+    """What the structured identity is *for*.
+
+    Three failures that a bare `is_error: true` would collapse into one, each
+    distinguishable without re-running anything.
+    """
+    import tempfile
+    from pathlib import Path
+
+    missing = _run_one_call("read", {"path": "/definitely/not/a/real/file"})
+    directory = _run_one_call("read", {"path": tempfile.gettempdir()})
+
+    kinds = {
+        (missing.data.get("info") or {}).get("error", {}).get("kind"),
+        (directory.data.get("info") or {}).get("error", {}).get("kind"),
+    }
+    assert kinds == {"missing", "directory"}, (
+        f"two different failures look the same in the log: {kinds}"
+    )
+    assert Path(tempfile.gettempdir()).is_dir(), "the fixture is not a directory"

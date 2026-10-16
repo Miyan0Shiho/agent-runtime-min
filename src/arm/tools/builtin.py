@@ -91,16 +91,37 @@ async def read_file(arguments: Mapping[str, Any], _execution: Any) -> ToolResult
     offset = max(1, int(arguments.get("offset", 1)))
     limit = max(1, int(arguments.get("limit", 2000)))
 
+    # M3.10: every failure carries a structured identity that persists with the
+    # result while staying out of what the model reads. Without it a trace shows
+    # `is_error: true` and nothing else -- a missing file, a directory and a
+    # permission denial are indistinguishable without re-running the call, which
+    # is exactly what a trace exists to avoid.
     try:
         raw = path.read_text(encoding="utf-8", errors="replace")
     except FileNotFoundError:
-        return ToolResult.fail(f"file not found: {path}")
+        return ToolResult.fail(
+            f"file not found: {path}",
+            code="TOOL_NOT_FOUND",
+            info={"path": str(path), "kind": "missing"},
+        )
     except IsADirectoryError:
-        return ToolResult.fail(f"{path} is a directory, not a file")
+        return ToolResult.fail(
+            f"{path} is a directory, not a file",
+            code="TOOL_NOT_A_FILE",
+            info={"path": str(path), "kind": "directory"},
+        )
     except PermissionError:
-        return ToolResult.fail(f"permission denied: {path}")
+        return ToolResult.fail(
+            f"permission denied: {path}",
+            code="TOOL_PERMISSION_DENIED",
+            info={"path": str(path), "kind": "permission"},
+        )
     except OSError as exc:
-        return ToolResult.fail(f"could not read {path}: {exc}")
+        return ToolResult.fail(
+            f"could not read {path}: {exc}",
+            code="TOOL_IO_ERROR",
+            info={"path": str(path), "kind": "io", "errno": exc.errno},
+        )
 
     lines = raw.splitlines()
     total = len(lines)

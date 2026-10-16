@@ -1253,6 +1253,23 @@ def _result_info(outcome: Any) -> dict[str, Any] | None:
     duration = getattr(outcome, "duration_ms", 0.0)
     if duration:
         info["duration_ms"] = round(duration, 3)
+
+    # M3.10: the *structured error identity* persists with the result while
+    # staying out of the model's content. It was built -- `ToolResult.fail`
+    # accepts `info`, the pipeline carries it -- and then dropped here, so the
+    # identity existed in memory for the length of one call and nowhere after.
+    #
+    # The contract conditioned this on "引入 M4 的 trace 评估时，该信息会成为评估
+    # 输入" -- that trigger has arrived: traces are recorded and evaluated now, and
+    # a trace that says only `is_error: true` cannot distinguish a timeout from a
+    # permission denial without re-running the call.
+    #
+    # It goes under `error` rather than being flattened into the sibling keys, so
+    # a reader can tell the tool's own structured detail from the fields the
+    # runtime adds.
+    detail = getattr(outcome.result, "error_info", None)
+    if detail:
+        info["error"] = dict(detail)
     return info or None
 
 
