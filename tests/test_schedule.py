@@ -1600,3 +1600,65 @@ def test_the_history_tool_does_not_claim_the_model_acted():
     description = tools["schedule_history"].definition.description
     assert "does not mean" in description
     assert "reached" in description
+
+
+# ===========================================================================
+# A long-overdue recurring reminder delivers once, not once per drive
+# ===========================================================================
+
+
+def _runtime_with(records, delivered):
+    """A runtime over an in-memory store, recording what it delivers."""
+    saved: list = []
+    store = ScheduleStore(sink=lambda rows: saved.append(list(rows)), source=records)
+    runtime = ScheduleRuntime(
+        store=store,
+        resolve=lambda _sid: object(),
+        deliver=lambda sid, body, mid: (delivered.append(mid), True)[1],
+    )
+    return runtime, saved
+
+
+def test_a_reminder_missed_for_years_delivers_once():
+    """The documented policy, verified where it is easy to get wrong.
+
+    "Only the most recent missed occurrence is delivered... Losing the
+    intermediate occurrences is the accepted cost of not having a backlog queue."
+
+    The unit that computes the next occurrence is tested; this checks the
+    property the user actually depends on -- that a reminder missed during a long
+    downtime does not re-fire every time the session wakes.
+
+    Found by probing it: I read `at_instant`, saw it still set to 2020 after a
+    delivery, and concluded the reminder would fire forever. It would not. For a
+    recurring task `due_at` reads `scheduled_at`, which advances, while
+    `at_instant` stays as the origin. The field I checked was not the field that
+    decides, and only driving it repeatedly showed that.
+    """
+    record = {
+        "id": "sch-recur",
+        "title": "stand up",
+        "instruction": "stand up",
+        "session_id": "s",
+        "kind": "every",
+        "status": "active",
+        "every_seconds": 60,
+        "at_instant": "2020-01-01T00:00:00+00:00",
+        "scheduled_at": "2020-01-01T00:00:00+00:00",
+        "created_at": "2020-01-01T00:00:00Z",
+    }
+    delivered: list = []
+    runtime, saved = _runtime_with([record], delivered)
+
+    for _ in range(5):
+        runtime.drive()
+
+    assert len(delivered) == 1, (
+        f"a reminder missed by years was delivered {len(delivered)} times "
+        "across five drives"
+    )
+    # And its next fire time moved forward, which is what stops the repeat.
+    after = saved[-1][0]
+    assert after.get("scheduled_at") != "2020-01-01T00:00:00+00:00", (
+        "the task did not advance, so it would be due again immediately"
+    )
