@@ -615,3 +615,186 @@ def test_a_plan_policy_change_is_visible_in_the_next_request():
     assert any(
         "Plan mode is off" in m.text for m in last.messages
     ), "the mode change was never announced to the model"
+
+
+# ===========================================================================
+# Plan mode must be enterable, and exitable
+# ===========================================================================
+
+
+def _run(awaitable):
+    """Drive an awaitable to completion.
+
+    `tool.body` is typed as `Awaitable`, which `asyncio.run` does not accept
+    directly -- it wants a coroutine. Wrapping it also keeps the tests readable.
+    """
+    import asyncio
+
+    async def main():
+        return await awaitable
+
+    return asyncio.run(main())
+
+
+def _activate(session, plan):
+    """Put the session into plan mode for real.
+
+    `PlanMode.set(True)` only *queues* outside a turn -- an event written with no
+    turn open would produce a log recovery cannot read. So the tests drive a real
+    turn, which is also how the mode is entered in practice.
+    """
+    import asyncio
+
+    from arm.agent.loop import Runtime
+    from arm.llm.mock import MockAdapter, tool_response
+    from arm.prompt.assembler import PromptAssembler
+    from arm.tools.registry import ToolRegistry
+
+    from arm.plan.mode import enter_tool
+
+    registry = ToolRegistry()
+    # The model "calls" enter_plan_mode; the scripted turn supplies the intent and
+    # the tool body does the work, so the path exercised is the real one.
+    registry.register(enter_tool(plan))
+    assembler = PromptAssembler()
+    assembler.set("core", "arm", priority=10)
+    loop = Runtime(
+        session,
+        MockAdapter([tool_response(("c1", "enter_plan_mode", {}))]),
+        registry,
+        assembler=assembler,
+        plan=plan,
+        model="m",
+    )
+    loop.submit("plan something")
+    asyncio.run(loop.run_until_idle())
+    assert plan.active, "plan mode was not activated by the turn"
+    return plan
+
+
+
+
+
+def test_plan_mode_can_be_entered():
+    """It could not be.
+
+    `PlanMode.set(active=True)` existed and the only caller anywhere was the exit
+    tool calling it with `False`, so a REQUIREMENTS item -- "任务编排: Plan mode"
+    -- described a mode the runtime could leave and never enter.
+
+    Found by asking a real model to enter it. It replied, correctly, that the only
+    plan tool it had was `exit_plan_mode`, and that "entering" was something the
+    user would have to do on their end.
+    """
+    from arm.plan.mode import PlanMode, enter_tool
+
+    session = Session.create("plan-enter")
+    plan = PlanMode(session)
+    assert not plan.active, "plan mode started active"
+
+    tool = enter_tool(plan)
+    result = _run(tool.body({}, None))
+
+    assert not result.is_error, result.content
+    assert plan.active, "the tool did not activate plan mode"
+    assert result.value["changed"] is True
+
+
+def test_entering_plan_mode_is_recorded_in_the_log():
+    """The mode is a durable fact, so it belongs in the log like every other.
+
+    A mode that lived only in memory would be lost on resume, and the model would
+    silently be in a different mode than the one the transcript describes.
+    """
+
+    from arm.plan.mode import PlanMode
+
+    session = Session.create("plan-enter-log")
+    plan = PlanMode(session)
+    # Driven through a real turn: outside one the change is queued rather than
+    # committed, and asserting on the log would then be asserting on nothing.
+    _activate(session, plan)
+
+    modes = [e for e in session if e.type == "plan/mode"]
+    assert modes, "no plan/mode event was recorded"
+    assert modes[-1].data["active"] is True
+
+
+def test_entering_twice_is_harmless():
+    """A model that asks again should be told the state, not toggled out of it."""
+    from arm.plan.mode import PlanMode, enter_tool
+
+    session = Session.create("plan-twice")
+    plan = PlanMode(session)
+    tool = enter_tool(plan)
+
+    _run(tool.body({}, None))
+    second = _run(tool.body({}, None))
+
+    assert plan.active, "the second call left plan mode"
+    assert second.value["changed"] is False
+    assert "already active" in second.content.lower()
+
+
+def test_exit_requires_an_approval_channel():
+    """Failing closed is correct for a missing channel -- and it was the only
+    behaviour the CLI ever had.
+
+    The CLI registered `plan_tools(plan_mode)` with no `approve`, so
+    `exit_plan_mode` failed every time and plan mode was a trap: a mode you could
+    enter and never leave.
+    """
+
+    from arm.plan.mode import PlanMode, plan_tools
+
+    session = Session.create("plan-no-channel")
+    plan = PlanMode(session)
+    _activate(session, plan)
+
+    tool = plan_tools(plan)  # no approve callback
+    result = _run(tool.body({"plan": "# Plan\n\nDo the thing."}, None))
+
+    assert result.is_error
+    assert "approval channel" in result.content
+    assert plan.active, "plan mode was left despite the failure"
+
+
+def test_exit_succeeds_when_the_plan_is_approved():
+    """The complement, and the behaviour the CLI now has."""
+
+    from arm.plan.mode import PlanMode, plan_tools
+
+    session = Session.create("plan-approved")
+    plan = PlanMode(session)
+    _activate(session, plan)
+
+    seen: list[str] = []
+
+    def approve(text: str) -> bool:
+        seen.append(text)
+        return True
+
+    tool = plan_tools(plan, approve=approve)
+    result = _run(tool.body({"plan": "# Plan\n\nDo the thing."}, None))
+
+    assert not result.is_error, result.content
+    assert result.value["approved"] is True
+    assert not plan.active, "plan mode stayed active after approval"
+    assert seen, "the approver was never shown the plan"
+
+
+def test_a_rejected_plan_keeps_plan_mode_active():
+    """A rejection must leave the model where it can revise."""
+
+    from arm.plan.mode import PlanMode, plan_tools
+
+    session = Session.create("plan-rejected")
+    plan = PlanMode(session)
+    _activate(session, plan)
+
+    tool = plan_tools(plan, approve=lambda _text: False)
+    result = _run(tool.body({"plan": "# Plan\n\nDo the thing."}, None))
+
+    assert not result.is_error
+    assert result.value["approved"] is False
+    assert plan.active, "a rejected plan still left plan mode"

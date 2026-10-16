@@ -270,7 +270,32 @@ def build_runtime(
     # catalogue must not change with the mode, so the tool is present and refuses
     # when there is nothing to exit.
     plan_mode = PlanMode(session)
-    registry.register(plan_tools(plan_mode))
+    # Plan mode needs an approval channel, and the CLI passed none -- so
+    # `exit_plan_mode` failed closed every time and plan mode was a trap: a mode
+    # you could enter and never leave. Measured by asking a real model to do it;
+    # it entered, planned, and reported that exiting was "an infrastructure
+    # problem, not the plan's".
+    #
+    # Failing closed is the right default for a missing channel. What was missing
+    # was the channel: under `ask` the person is present and can answer.
+    def approve_plan(plan_text: str) -> bool:
+        if policy != POLICY_ASK:
+            return False
+        print("\n--- proposed plan ---\n")
+        print(plan_text)
+        try:
+            answer = input("\napprove this plan? [y/N] ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            return False
+        return answer in {"y", "yes"}
+
+    registry.register(plan_tools(plan_mode, approve=approve_plan))
+    # Plan mode had no way in: only the exit tool existed, and `PlanMode.set` was
+    # called with False by it and nowhere else. A REQUIREMENTS item described a
+    # mode the runtime could leave and never enter.
+    from ..plan.mode import enter_tool as _enter_plan_tool
+
+    registry.register(_enter_plan_tool(plan_mode))
 
     # Goals persist in the session log, so a restored session finds its goal.
     # Activation does not persist, which is why a resumed goal does not keep

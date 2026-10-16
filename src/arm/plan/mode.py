@@ -265,6 +265,69 @@ class PlanMode:
         return {"plan_active": self.active}
 
 
+def enter_tool(plan: PlanMode):
+    """The ``enter_plan_mode`` tool.
+
+    Plan mode had no way in. `PlanMode.set(active=True)` existed and the only
+    caller anywhere was the exit tool calling it with `False`, so a REQUIREMENTS
+    item -- "任务编排: Plan mode" -- described a mode the runtime could leave and
+    never enter. Found by asking a real model to enter it and being told,
+    correctly, that no such tool existed.
+
+    Registered unconditionally, like the exit tool: the catalogue must not change
+    with the mode, or a model that wants to plan would have to already be
+    planning to say so.
+    """
+    from pydantic import BaseModel, Field
+
+    from ..tools.definition import RegisteredTool, ToolDefinition, ToolResult
+
+    class EnterParams(BaseModel):
+        reason: str = Field(
+            default="",
+            description=(
+                "One line on what is being planned, shown to the user. Optional."
+            ),
+        )
+
+    async def body(arguments: Mapping[str, Any], _execution: Any) -> Any:
+        if plan.active:
+            return ToolResult.ok(
+                "Plan mode is already active. Investigate, then call "
+                "`exit_plan_mode` with the plan.",
+                value={"active": True, "changed": False},
+            )
+        if plan.pending:
+            return ToolResult.ok(
+                "A plan is already awaiting approval.",
+                value={"active": True, "changed": False},
+            )
+
+        plan.set(True)
+        plan.commit_pending()
+        note = str(arguments.get("reason", "")).strip()
+        return ToolResult.ok(
+            "Plan mode is active. Investigate without changing state, then call "
+            "`exit_plan_mode` with a plan that names the files and the order."
+            + (f"\n\nPlanning: {note}" if note else ""),
+            value={"active": True, "changed": True},
+        )
+
+    return RegisteredTool(
+        definition=ToolDefinition(
+            name="enter_plan_mode",
+            description=(
+                "Enter plan mode: investigate and propose a plan for approval "
+                "before making changes. Use it when a task is large enough that "
+                "the approach is worth agreeing on first."
+            ),
+            parameters=EnterParams.model_json_schema(),
+        ),
+        body=body,
+        validator=EnterParams,
+    )
+
+
 def plan_tools(plan: PlanMode, *, approve: Callable[[str], Any] | None = None):
     """The ``exit_plan_mode`` tool.
 
