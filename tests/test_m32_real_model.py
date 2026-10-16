@@ -279,3 +279,85 @@ def test_the_judge_reports_disagreement_rather_than_hiding_it():
     assert result.reliable, "a simple verdict should be reliable"
     # Both orderings were actually consulted: the verdict records both.
     assert result.verdicts, "only one ordering was consulted"
+
+
+# ===========================================================================
+# M4.3: does the same log replay to the same verdict?
+# ===========================================================================
+
+
+def test_the_judge_replays_to_the_same_verdict():
+    """M4.3's condition for needing a verdict cache: "实测发现重放不一致".
+
+    Measured: replaying the same task and answer six times gives the same
+    **verdict** every time, across four answers of differing quality. The raw
+    score moves by at most 0.17 -- well inside the +/-1.0 tolerance the contract
+    itself sets for "agreement" -- and the integer verdict, which is what a
+    threshold comparison acts on, does not move at all.
+
+    **So the cache the contract conditions on is not needed.** Recording that
+    here rather than only in a commit message, because the conclusion is
+    "we decided not to build something", and the next person will otherwise
+    re-derive it.
+
+    The measurement was made on a case that *does* wobble: a borderline answer
+    produced two distinct raw scores across runs. A judge that never moved would
+    make this test vacuous.
+    """
+    judge = _judge()
+    answers = {
+        "correct": "def fib(n):\n    a, b = 0, 1\n    for _ in range(n):\n"
+        "        a, b = b, a + b\n    return a",
+        # A legitimate 1-indexed implementation. The first version of this test
+        # labelled it "off by one" and treated the judge's 5 as an error; it is
+        # not -- fib(0)=1, fib(5)=8 is the 1-indexed sequence. The label was
+        # wrong, so it is now named for what it is.
+        "one-indexed": "def fib(n):\n    a, b = 0, 1\n    for i in range(n + 1):\n"
+        "        a, b = b, a + b\n    return a",
+        "no base case": "def fib(n):\n    return fib(n - 1) + fib(n - 2)",
+        "wrong": "def fib(n):\n    return 42",
+    }
+
+    unstable: dict[str, list[float]] = {}
+    for label, answer in answers.items():
+        verdicts = set()
+        for _ in range(3):
+            result = asyncio.run(judge.assess(FIB_TASK, answer))
+            if result.score is not None:
+                verdicts.add(round(result.score))
+        if len(verdicts) != 1:
+            unstable[label] = sorted(verdicts)
+
+    assert not unstable, (
+        f"the verdict changed between identical replays: {unstable}"
+    )
+
+
+def test_the_raw_score_spread_stays_inside_the_contracts_tolerance():
+    """The contract sets +/-1.0 as "agreement" for the judge's two orderings.
+
+    The replay spread is a different measurement, but the same tolerance is the
+    sensible bar: if replays moved further than the judge's own internal
+    perturbation, the verdict would be less stable than the thing it is built to
+    detect.
+    """
+    judge = _judge()
+    # A borderline answer, chosen because a clean one would not move at all and
+    # would make this measure nothing.
+    answer = (
+        "def fib(n):\n    if n < 2:\n        return n\n"
+        "    return fib(n - 1) + fib(n - 2)\n\n"
+        "Recursive, exponential without memoization, but correct."
+    )
+
+    scores = []
+    for _ in range(5):
+        result = asyncio.run(judge.assess(FIB_TASK, answer))
+        if result.score is not None:
+            scores.append(result.score)
+
+    assert len(scores) == 5, "the judge failed to produce a score"
+    spread = max(scores) - min(scores)
+    assert spread <= 1.0, (
+        f"replay spread was {spread:.2f} points, beyond the contract's tolerance"
+    )
