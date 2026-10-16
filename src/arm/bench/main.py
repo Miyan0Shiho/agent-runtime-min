@@ -629,6 +629,23 @@ def measure_eval_reproducibility(*, repeats: int = 3) -> Metric:
 
     A verdict that changes between identical runs means the evaluation depends on
     something outside the log, and every number it produces is suspect.
+
+    **What this measures, stated because the name over-promises.** It exercises
+    only the *deterministic* checks -- `output_matches`, `file_exists` -- so its
+    100% is the reproducibility of code that cannot be non-reproducible. M4.2's
+    invariant ("同一日志重放必须得到同一结论") is about the evaluation as a
+    whole, and the part that can actually drift is the **judge**, which this
+    function does not call.
+
+    That is deliberate here and covered elsewhere: a judge needs a real provider,
+    and `make bench` must run without one. The judge's replay stability is
+    measured in `tests/test_m32_real_model.py`, which skips when no key is
+    configured -- and the measurement found the verdicts stable, so the cache the
+    contract conditions on is not needed.
+
+    The detail line below says "deterministic checks" so a reader cannot mistake
+    this number for judge reproducibility. Reporting a metric whose label claims
+    more than it measures is how a gap stays invisible.
     """
     session = Session.create("bench-m4")
     session.append_message("system", [{"type": "text", "text": "sys"}])
@@ -652,7 +669,10 @@ def measure_eval_reproducibility(*, repeats: int = 3) -> Metric:
         measured=True,
         value=rate * 100.0,
         unit="%",
-        detail=f"{agreements}/{repeats} repeat runs agreed with the baseline",
+        detail=(
+            f"{agreements}/{repeats} repeat runs agreed with the baseline "
+            "(deterministic checks only; judge stability is measured separately)"
+        ),
     )
 
 

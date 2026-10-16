@@ -820,3 +820,31 @@ def test_the_fixture_cost_is_far_below_the_contract_threshold():
         "so something large was added"
     )
     assert files > 0, "no case has a fixture, so this test measures nothing"
+
+
+def test_the_reproducibility_metric_states_that_it_excludes_the_judge():
+    """A metric whose label claims more than it measures hides the gap.
+
+    `make bench` reports "M4 reproducibility 100%", but it exercises only the
+    deterministic checks -- no judge anywhere. Its 100% is the reproducibility of
+    code that cannot be non-reproducible, which is true and nearly uninformative.
+
+    M4.2's invariant is about the evaluation as a whole, and the component that
+    can actually drift is the judge. That needs a real provider, so it cannot
+    live in `make bench`; it lives in `tests/test_m32_real_model.py` instead.
+
+    This test pins the disclosure, not the number: the detail line must say what
+    it left out.
+    """
+    from arm.bench.main import measure_eval_reproducibility
+
+    metric = measure_eval_reproducibility(repeats=2)
+
+    assert metric.measured
+    assert metric.value == 100.0
+    assert "deterministic" in metric.detail, (
+        f"the detail line does not disclose the metric's scope: {metric.detail!r}"
+    )
+    assert "judge" in metric.detail, (
+        "the detail line does not say that judge stability is measured elsewhere"
+    )
