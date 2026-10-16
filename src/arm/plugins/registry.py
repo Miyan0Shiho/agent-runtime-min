@@ -163,6 +163,47 @@ class PluginRegistry:
         A failure leaves nothing behind: the disposers recorded so far are called
         in reverse before the error propagates. A partially loaded plugin would
         look installed and behave unpredictably.
+
+        **What a plugin must look like.** Stated here because it was nowhere, and
+        writing a plugin meant discovering it by failing three times:
+
+        .. code-block:: python
+
+            # my_plugin.py
+            from arm.tools.definition import RegisteredTool, ToolDefinition, ToolResult
+
+            async def _body(arguments, _execution):
+                return ToolResult.ok("hello from the plugin")
+
+            class Plugin:
+                name = "my-plugin"          # optional; defaults to the module name
+
+                def install(self, context):
+                    context.register_tool(
+                        RegisteredTool(
+                            definition=ToolDefinition(
+                                name="my_tool", description="...", parameters={},
+                            ),
+                            body=_body,
+                        )
+                    )
+
+            plugin = Plugin    # <- the name the loader looks for
+
+        Three shapes are accepted, and the order matters:
+
+        1. a module-level name -- ``plugin``, ``PLUGIN`` or ``install``. If that
+           name holds a *class* or an *instance*, it is used directly; if it holds
+           a plain function, the function is treated as a **factory** and its
+           return value is then asked for ``.install(context)``;
+        2. ``module:attribute``, naming the class or instance explicitly, which is
+           how you avoid the ambiguity in (1);
+        3. anything else the module exposes as ``plugin``/``PLUGIN``.
+
+        The trap in (1) is a module-level ``def install(context)``: it reads like
+        the interface, but the loader calls it with **no arguments** as a factory,
+        and the resulting ``TypeError`` says only "install() missing 1 required
+        positional argument". Name a class instead -- or use ``module:Attribute``.
         """
         name, factory = self._resolve(spec)
 

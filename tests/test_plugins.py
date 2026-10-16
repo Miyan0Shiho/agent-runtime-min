@@ -566,3 +566,135 @@ def test_a_plugin_can_import_a_sibling_module(tmp_path: Path):
     assert "sibling-tool" in tools.view().known, (
         "a plugin could not import a module next to it"
     )
+
+
+# ===========================================================================
+# The documented plugin shape must be the one that actually loads
+# ===========================================================================
+
+
+def test_the_documented_plugin_shape_loads(tmp_path, monkeypatch):
+    """The shape the `load` docstring now shows, verified as written.
+
+    Writing a plugin meant failing three times on the way to a working one:
+
+      1. a class named `Plugin` with no module-level name -- the loader wanted
+         `plugin`, `PLUGIN` or `install`;
+      2. a module-level `def install(context)` -- which reads like the interface,
+         but the loader calls it with *no* arguments as a factory, so it failed
+         with "install() missing 1 required positional argument";
+      3. a class assigned to a module-level `plugin` -- which works.
+
+    The docstring is the fix; this test keeps it honest. If the accepted shape
+    changes and the example does not, this fails rather than the next person
+    failing three times.
+    """
+    from arm.plugins.registry import PluginRegistry
+    from arm.tools.registry import ToolRegistry
+
+    module = tmp_path / "documented_plugin.py"
+    module.write_text(
+        '''
+from arm.tools.definition import RegisteredTool, ToolDefinition, ToolResult
+
+
+async def _body(arguments, _execution):
+    return ToolResult.ok("hello from the plugin")
+
+
+class Plugin:
+    name = "documented-plugin"
+
+    def install(self, context):
+        context.register_tool(
+            RegisteredTool(
+                definition=ToolDefinition(
+                    name="documented_tool", description="...", parameters={},
+                ),
+                body=_body,
+            )
+        )
+
+
+plugin = Plugin
+'''
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+
+    tools = ToolRegistry()
+    registry = PluginRegistry(tools=tools)
+
+    registry.load("documented_plugin")
+
+    assert registry.loaded == ("documented-plugin",)
+    assert tools.get("documented_tool") is not None, (
+        "the documented shape loaded but registered no tool"
+    )
+
+
+def test_a_module_level_install_function_is_treated_as_a_factory(tmp_path, monkeypatch):
+    """The trap the docstring warns about, asserted so the warning stays true.
+
+    `def install(context)` at module level looks like the interface. It is not:
+    the loader calls it with no arguments as a factory. The failure message names
+    a missing argument rather than the misunderstanding, which is why it is worth
+    documenting rather than only handling.
+    """
+    from arm.plugins.registry import PluginError, PluginRegistry
+    from arm.tools.registry import ToolRegistry
+
+    module = tmp_path / "install_function_plugin.py"
+    module.write_text(
+        '''
+def install(context):
+    """Looks like the entry point. Is treated as a factory."""
+    context.register_tool(None)
+'''
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+
+    registry = PluginRegistry(tools=ToolRegistry())
+
+    with pytest.raises(PluginError) as info:
+        registry.load("install_function_plugin")
+    assert "install() missing" in str(info.value), (
+        f"the failure no longer matches the documented trap: {info.value}"
+    )
+
+
+def test_naming_the_attribute_explicitly_avoids_the_ambiguity(tmp_path, monkeypatch):
+    """`module:attribute` is the documented escape hatch."""
+    from arm.plugins.registry import PluginRegistry
+    from arm.tools.registry import ToolRegistry
+
+    module = tmp_path / "explicit_plugin.py"
+    module.write_text(
+        '''
+from arm.tools.definition import RegisteredTool, ToolDefinition, ToolResult
+
+
+async def _body(arguments, _execution):
+    return ToolResult.ok("explicit")
+
+
+class MyThing:
+    name = "explicit-plugin"
+
+    def install(self, context):
+        context.register_tool(
+            RegisteredTool(
+                definition=ToolDefinition(name="explicit_tool", description="", parameters={}),
+                body=_body,
+            )
+        )
+'''
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+
+    tools = ToolRegistry()
+    registry = PluginRegistry(tools=tools)
+
+    registry.load("explicit_plugin:MyThing")
+
+    assert registry.loaded == ("explicit-plugin",)
+    assert tools.get("explicit_tool") is not None
