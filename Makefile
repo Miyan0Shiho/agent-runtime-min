@@ -53,10 +53,21 @@ claims:
 bench-json:
 	@PYTHONPATH=$(SRC):. $(PY) -m arm.bench.main --json
 
+# Does the assembled runtime work? The unit suite tests the parts by building
+# them itself; this builds them the way the CLI does and asks whether one call
+# through each subsystem succeeds. Every defect found by *running* this project
+# was in the wiring, which is the class no unit test can see.
+#
+# Offline by default so it can run anywhere. Set ARM_SMOKE_MODEL_KEY to add a
+# real provider turn and a real MCP call, which is the only way to catch defects
+# in the contract with an external system rather than in our own code.
+smoke:
+	@PYTHONPATH=$(SRC):. $(PY) -m arm.bench.smoke
+
 typecheck:
 	pyright
 
-check: test typecheck
+check: test typecheck smoke
 
 clean:
 	rm -rf .pytest_cache .pyright .coverage htmlcov
