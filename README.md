@@ -4,10 +4,10 @@
 > **[REQUIREMENTS.md](REQUIREMENTS.md) —— 需求书,自包含。** 换干净对话做实现时,先读这份,再按其中的索引读细节。
 >
 > **状态:L4 · 内核主干 + T3 全部 + MCP + hooks + 插件 + 浏览器 + 电脑操作 + Docker 沙箱完成 · 四份契约的「未解决」清单已全部关闭 · 已纳入 git** · 立项 2026-10-07 · 设计完成 2026-10-12 · 实现 2026-10-12
-> **代码:27,964 行实现 / 22,872 行测试 / 1,240 个测试通过(另 12 条需真模型 key,无 key 自动 skip) / 81 个模块** · `make bench` / `make claims` / `make deadcode` / `make smoke` 全绿
+> **代码:28,007 行实现 / 22,872 行测试 / 1,240 个测试通过(另 12 条需真模型 key,无 key 自动 skip) / 81 个模块** · `make bench` / `make claims` / `make deadcode` / `make smoke` 全绿
 > 决策链:[ADR-0001](docs/decisions/0001-scope-and-non-goals.md)(范围/clean-room)→ [ADR-0002](docs/decisions/0002-design-alignment-and-native-builtins.md)(设计对齐)→ [ADR-0003](docs/decisions/0003-usable-harness-and-t3-scope.md)(可自用 + 全做 + 顺序护栏)
 > 设计产物:主链路 1 份 + 机制契约 4 份(**78 条不变量**)+ 决策记录 3 份 + 参考 2 份
-> 实施产物:**内核主干 M1–M4 全部实现** + [契约修正记录](docs/contract-amendments.md) + [前置验证](spikes/)
+> 实施产物:**内核主干 M1–M4 全部实现** + [契约修正记录](docs/contract-amendments.md)(83 条真实缺陷) + [方法论教训](docs/lessons.md) + [前置验证](spikes/)
 
 ## 现在能跑什么
 
@@ -117,7 +117,10 @@ src/arm/
 
 ## 实现期发现并修掉的真实缺陷
 
-设计与实现之间总有缝。以下是实现**暴露出来的**、原契约没覆盖的问题,完整清单见 [契约修正记录](docs/contract-amendments.md):
+设计与实现之间总有缝。以下是实现**暴露出来的**、原契约没覆盖的问题:
+
+- **完整清单**:[契约修正记录](docs/contract-amendments.md) —— 83 条,含复现步骤与实测输出
+- **教训**(比缺陷更值得读):[方法论教训](docs/lessons.md) —— 同一个错误在项目里犯过两次以上才被记下来的那些
 
 | # | 缺陷 | 为什么单测抓不到 |
 |---|---|---|
@@ -268,7 +271,7 @@ agent-runtime-min/
     decisions/                   ADR-0001 / 0002 / 0003
     market-native-builtins.md    DSH 插件市场实测(4,508 插件 / 23 分类)
     t3-ordering-and-guardrails.md T3 顺序(依赖拓扑)+ 执行护栏
-  src/arm/                                    实现(81 个模块 / 27,923 行)
+  src/arm/                                    实现(81 个模块 / 28,007 行)
   tests/                                      1,240 个测试 / 22,872 行
   spikes/                                     前置验证与对抗性审查(Q1 取消语义 / Q2 schema / Q3 瀑布)
   Makefile                                    make bench = 测试 + 四项验收指标

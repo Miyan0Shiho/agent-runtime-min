@@ -315,6 +315,49 @@ def _checks_offline(report: Report) -> None:
 
     _check(report, "the README states true counts", readme_counts_are_true)
 
+    def defect_register_is_consistent() -> str:
+        """The defect count in the docs matches the register that enumerates it.
+
+        The count was wrong in the docs for several rounds: I reported "87
+        defects" while the enumerated table stopped at 74 and four numbers were
+        never used. The register in `contract-amendments.md` §0 now says how many
+        numbers exist, how many are skipped, and therefore how many defects there
+        are -- and this checks the rest of the docs agree with it.
+
+        A count nobody can verify is the same problem as the stale README line
+        counts: it reads as evidence, and it is not.
+        """
+        root = Path(__file__).resolve().parents[3]
+        amendments = (root / "docs" / "contract-amendments.md").read_text(encoding="utf-8")
+        lessons = (root / "docs" / "lessons.md").read_text(encoding="utf-8")
+        readme = (root / "README.md").read_text(encoding="utf-8")
+
+        import re
+
+        start = amendments.index("## 0. ")
+        end = amendments.index("\n---", start)
+        register = amendments[start:end]
+
+        covered: set[int] = set()
+        for match in re.finditer(r"\| (\d+)(?:[–-](\d+))? \|", register):
+            first = int(match.group(1))
+            last = int(match.group(2)) if match.group(2) else first
+            covered.update(range(first, last + 1))
+
+        skipped = sorted(int(n) for n in re.findall(r"\| (\d+) \| （未使用）", register))
+        actual = len(covered) - len(skipped)
+
+        if not skipped:
+            raise AssertionError("the register does not list its skipped numbers")
+        stated = f"{actual} 条"
+        if stated not in lessons:
+            raise AssertionError(f"lessons.md does not state {stated}")
+        if f"{actual} 条真实缺陷" not in readme:
+            raise AssertionError(f"README does not state {actual} real defects")
+        return f"{len(covered)} numbers, {len(skipped)} skipped, {actual} defects"
+
+    _check(report, "the defect count is verifiable and consistent", defect_register_is_consistent)
+
     def every_tool_is_reachable() -> str:
         """Every registered tool resolves through the pipeline's registry.
 
