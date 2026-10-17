@@ -4,7 +4,7 @@
 > **[REQUIREMENTS.md](REQUIREMENTS.md) —— 需求书,自包含。** 换干净对话做实现时,先读这份,再按其中的索引读细节。
 >
 > **状态:L4 · 内核主干 + T3 全部 + MCP + hooks + 插件 + 浏览器 + 电脑操作 + Docker 沙箱完成 · 四份契约的「未解决」清单已全部关闭 · 已纳入 git** · 立项 2026-10-07 · 设计完成 2026-10-12 · 实现 2026-10-12
-> **代码:26,923 行实现 / 21,518 行测试 / 1,199 个测试通过(另 12 条需真模型 key,无 key 自动 skip) / 80 个模块** · `make bench` / `make claims` / `make deadcode` 三绿
+> **代码:27,964 行实现 / 22,872 行测试 / 1,240 个测试通过(另 12 条需真模型 key,无 key 自动 skip) / 81 个模块** · `make bench` / `make claims` / `make deadcode` / `make smoke` 全绿
 > 决策链:[ADR-0001](docs/decisions/0001-scope-and-non-goals.md)(范围/clean-room)→ [ADR-0002](docs/decisions/0002-design-alignment-and-native-builtins.md)(设计对齐)→ [ADR-0003](docs/decisions/0003-usable-harness-and-t3-scope.md)(可自用 + 全做 + 顺序护栏)
 > 设计产物:主链路 1 份 + 机制契约 4 份(**78 条不变量**)+ 决策记录 3 份 + 参考 2 份
 > 实施产物:**内核主干 M1–M4 全部实现** + [契约修正记录](docs/contract-amendments.md) + [前置验证](spikes/)
@@ -14,6 +14,43 @@
 ```bash
 make bench     # 一条命令:跑全部测试 + 输出四项验收指标
 ```
+
+### 四个检查命令,回答四个不同的问题
+
+| 命令 | 问的问题 | 什么时候会红 |
+|---|---|---|
+| `make test` | 每个零件对不对 | 某个单元的行为变了 |
+| `make bench` | 验收指标达没达到 | M1–M4 的阈值破了 |
+| `make smoke` | **装起来之后能不能用** | 零件都在,但没接上 |
+| `make deadcode` | 有没有**代码没人调用** | 新增了未调用的定义 |
+| `make claims` | 设计文档的断言**是否成立** | 实测推翻了文档的假设 |
+
+**`make smoke` 是这五个里最重要的一个,也是最晚加的。** 它的由来值得说清楚:
+
+这个项目里**所有靠「真跑一次」才发现的缺陷,形状都一样 —— 零件是对的,接线是错的**:
+
+| 缺陷 | 零件 | 错在 |
+|---|---|---|
+| `developer` 角色被 provider 拒 | 内部词汇表正确 | 线上映射 |
+| MCP 每次调用都失败 | 传输层、客户端都正确 | **CLI 把两个事件循环接错** |
+| 子会话 schema 没告诉子 agent | 校验器正确 | 提示词构造 |
+| plan mode 进得去出不来 | 模式实现正确 | CLI 没传审批通道 |
+| hooks 拦了,日志说不出谁拦的 | hook 执行正确 | 身份没进日志 |
+
+**这些没有一个是单元测试失败** —— 因为单元测试**自己搭零件**。它们共同的问题是:
+
+> **按 CLI 的方式把 runtime 装起来之后,调用某个东西真的能用吗?**
+
+`make smoke` 问的就是这个,对着真实的 `build_runtime` 跑。当前 **12 项离线检查**(其中两项逐个检查了 **26 个工具 / 9 个子系统**的连通性),`make check` 已包含它。
+
+```bash
+make smoke                          # 离线:不需要 provider
+ARM_SMOKE_MODEL_KEY=... make smoke  # 加上真实 provider 往返 + 真实 MCP 调用
+```
+
+> **每一项都验证过「撤掉修复会失败」。** 一个不能失败的检查比没有检查更糟 —— 它占着「这里有覆盖」的位置。
+>
+> 而且它在开发中就抓住过自己:**smoke 检查器本身写出了它要检测的那个跨循环 bug**,只有真跑一次带 provider 才暴露。
 
 实测输出(2026-10-12):
 
@@ -231,8 +268,8 @@ agent-runtime-min/
     decisions/                   ADR-0001 / 0002 / 0003
     market-native-builtins.md    DSH 插件市场实测(4,508 插件 / 23 分类)
     t3-ordering-and-guardrails.md T3 顺序(依赖拓扑)+ 执行护栏
-  src/arm/                                    实现(80 个模块 / 26,923 行)
-  tests/                                      1,131 个测试 / 19,454 行
+  src/arm/                                    实现(81 个模块 / 27,923 行)
+  tests/                                      1,240 个测试 / 22,872 行
   spikes/                                     前置验证与对抗性审查(Q1 取消语义 / Q2 schema / Q3 瀑布)
   Makefile                                    make bench = 测试 + 四项验收指标
 ```

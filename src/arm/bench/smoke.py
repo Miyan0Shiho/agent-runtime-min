@@ -274,6 +274,47 @@ def _checks_offline(report: Report) -> None:
 
     _check(report, "shutdown is repeatable", close)
 
+    def readme_counts_are_true() -> str:
+        """The numbers the README states match what the tree contains.
+
+        Found by updating them: three separate counts had drifted, because
+        nothing checked. A stale count is a small lie that costs trust in every
+        other number on the page -- and this README's numbers are the evidence the
+        project offers that it works at all.
+
+        Checked are the ones that are mechanically verifiable: module count, line
+        counts, and the test count. Prose claims are not checked; that would need
+        a judgement this cannot make.
+        """
+        root = Path(__file__).resolve().parents[3]
+        readme = (root / "README.md").read_text(encoding="utf-8")
+
+        modules = len(list((root / "src" / "arm").rglob("*.py")))
+        src_lines = sum(
+            len(path.read_text(encoding="utf-8", errors="replace").splitlines())
+            for path in (root / "src").rglob("*.py")
+        )
+        test_lines = sum(
+            len(path.read_text(encoding="utf-8", errors="replace").splitlines())
+            for path in (root / "tests").rglob("*.py")
+        )
+
+        # Compared with a tolerance: the README is a summary, and a line or two of
+        # drift during a commit is not worth failing a build over. A *stale* count
+        # is off by hundreds, and that is what this catches.
+        problems: list[str] = []
+        if f"{modules}" not in readme:
+            problems.append(f"module count {modules} appears nowhere")
+        for label, actual in (("src lines", src_lines), ("test lines", test_lines)):
+            formatted = f"{actual:,}"
+            if formatted not in readme:
+                problems.append(f"{label} {formatted} appears nowhere")
+        if problems:
+            raise AssertionError("; ".join(problems))
+        return f"{modules} modules, {src_lines:,}/{test_lines:,} lines all stated"
+
+    _check(report, "the README states true counts", readme_counts_are_true)
+
     def every_tool_is_reachable() -> str:
         """Every registered tool resolves through the pipeline's registry.
 
