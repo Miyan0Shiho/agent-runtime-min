@@ -900,3 +900,84 @@ def test_closing_terminates_the_process(server_script: Path):
     started, stopped = run_all(scenario)
     assert started
     assert stopped
+
+
+# ===========================================================================
+# The CLI must be able to use an MCP server it started
+# ===========================================================================
+
+
+def test_a_server_connected_on_one_loop_fails_on_another(tmp_path: Path):
+    """The defect, reproduced at its source.
+
+    The CLI connected servers with `asyncio.run(mcp_manager.connect_all())` and
+    then ran the session with a second `asyncio.run`. The transport holds
+    loop-bound resources -- the subprocess and its pipes -- so every tool call
+    failed:
+
+        got Future <Future pending> attached to a different loop
+
+    The server had started and its tool was registered, which is what made it
+    look healthy: a registration check would pass while every invocation failed.
+
+    This asserts the failure mode exists rather than mocking it away, so the fix
+    cannot regress into "it connects" without "it works".
+    """
+    server = tmp_path / "server.py"
+    server.write_text(SERVER_SCRIPT)
+
+    registry = ToolRegistry()
+    manager = McpManager(registry)
+    manager.register(
+        McpServerConfig(
+            name="echo",
+            connect=lambda: connect_stdio(
+                StdioServerConfig(command=sys.executable, args=[str(server)])
+            ),
+        )
+    )
+
+    # Loop A: connect, then let it close -- exactly what the CLI did.
+    asyncio.run(manager.connect_all())
+    assert "mcp__echo__echo" in registry.view().known, "the tool was not registered"
+
+    # Loop B: call it. This is where the CLI failed.
+    async def call_on_another_loop():
+        tool = registry.get("mcp__echo__echo")
+        assert tool is not None
+        return await tool.body({"text": "hi"}, None)
+
+    result = asyncio.run(call_on_another_loop())
+    assert result.is_error, (
+        "a transport connected on a closed loop unexpectedly worked; if this is "
+        "now supported, the CLI no longer needs to connect inside the run loop"
+    )
+    assert "different loop" in result.content
+
+
+def test_connecting_and_calling_on_the_same_loop_works(tmp_path: Path):
+    """The fix, stated as the property it provides."""
+    server = tmp_path / "server.py"
+    server.write_text(SERVER_SCRIPT)
+
+    registry = ToolRegistry()
+    manager = McpManager(registry)
+    manager.register(
+        McpServerConfig(
+            name="echo",
+            connect=lambda: connect_stdio(
+                StdioServerConfig(command=sys.executable, args=[str(server)])
+            ),
+        )
+    )
+
+    async def scenario():
+        failures = await manager.connect_all()
+        assert failures == [], failures
+        tool = registry.get("mcp__echo__echo")
+        assert tool is not None
+        return await tool.body({"text": "hi"}, None)
+
+    result = asyncio.run(scenario())
+    assert not result.is_error, result.content
+    assert result.content == "echo:hi"

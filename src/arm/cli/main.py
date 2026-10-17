@@ -119,6 +119,23 @@ def _load_mcp_servers(path: Path) -> list[McpServerConfig]:
         print(f"warning: {path} must contain an object of server definitions")
         return []
 
+    # Both shapes are accepted, and the wrapped one is the ecosystem standard.
+    #
+    #   {"mcpServers": {"adder": {...}}}   <- Claude Desktop, Cursor, VS Code
+    #   {"adder": {...}}                   <- the bare form
+    #
+    # Found by writing a config the way every other MCP client documents it: the
+    # loader read `mcpServers` as a *server named* "mcpServers", found no
+    # `command` under it, and warned "'mcpServers' needs a 'command'". A config
+    # that works in every other tool was silently ignored, and the warning
+    # pointed at the wrong problem.
+    #
+    # Accepting both costs one unwrap. Requiring only the bare form would mean
+    # every user's existing config has to be rewritten, and the error message
+    # would not say so.
+    if isinstance(raw.get("mcpServers"), dict):
+        raw = raw["mcpServers"]
+
     servers: list[McpServerConfig] = []
     for name, entry in raw.items():
         if not isinstance(entry, dict) or not entry.get("command"):
@@ -597,15 +614,17 @@ def build_runtime(
             mcp_manager.register(server)
         except Exception as exc:  # noqa: BLE001 - one bad entry is not fatal
             print(f"warning: ignoring MCP server {server.name!r}: {exc}", file=sys.stderr)
-    if mcp_manager.servers:
-        failures = asyncio.run(mcp_manager.connect_all())
-        required = mcp_manager.required_failures(failures)
-        if required:
-            raise RuntimeError(
-                f"required MCP servers could not start: {required}"
-            )
-        for name in failures:
-            print(f"warning: MCP server {name!r} is unavailable", file=sys.stderr)
+    # MCP servers are connected by the caller, inside the event loop that will
+    # use them. Connecting here with `asyncio.run` created a loop, opened the
+    # servers' pipes on it, and then closed it -- so every later tool call failed:
+    #
+    #     got Future <Future pending> attached to a different loop
+    #
+    # Measured through the CLI: the server started, its tool was registered, and
+    # every invocation of that tool failed. The registration made it look healthy.
+    #
+    # The connection is a resource bound to a loop, so it belongs to whatever loop
+    # runs the session, not to configuration building.
         # A server's instructions become a prompt segment, attributed per server.
         # The assembler is consulted at prompt-render time, so registering the
         # segment after the servers connected is what makes the text appear in the
@@ -720,6 +739,23 @@ def _print_events(session: Session, *, verbose: bool) -> None:
             )
 
 
+async def _connect_mcp(mcp_manager: McpManager) -> None:
+    """Start the MCP servers on *this* loop, before anything uses their tools.
+
+    Called from inside the loop that runs the session, because the transport
+    holds loop-bound resources: the subprocess and its pipes. A connection made on
+    another loop is not usable from this one.
+    """
+    if not mcp_manager.servers:
+        return
+    failures = await mcp_manager.connect_all()
+    required = mcp_manager.required_failures(failures)
+    if required:
+        raise RuntimeError(f"required MCP servers could not start: {required}")
+    for name in failures:
+        print(f"warning: MCP server {name!r} is unavailable", file=sys.stderr)
+
+
 async def _run_task(
     runtime: Runtime, session: Session, task: str, *, verbose: bool,
     scheduler: ScheduleRuntime | None = None,
@@ -749,19 +785,21 @@ async def _run_task(
 
 
 def _cmd_run(args: argparse.Namespace) -> int:
-    runtime, session, handle, _scheduler, _mcp = build_runtime(
+    runtime, session, handle, _scheduler, mcp_manager = build_runtime(
         session_id=args.session,
         model=args.model,
         home=args.home,
         hooks=None,
     )
     try:
-        return asyncio.run(
-            _run_task(
+        async def _with_mcp() -> int:
+            await _connect_mcp(mcp_manager)
+            return await _run_task(
                 runtime, session, args.task,
                 verbose=not args.quiet, scheduler=_scheduler,
             )
-        )
+
+        return asyncio.run(_with_mcp())
     finally:
         if handle is not None:
             handle.close()
@@ -779,7 +817,11 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         # user is sitting at the prompt, which is the idle gap the timer exists
         # for -- covering only the running task would leave exactly that gap
         # uncovered, and the reminder would wait for the next unrelated task.
-        asyncio.run(_chat_loop(runtime, session, scheduler, args))
+        async def _with_mcp() -> int:
+            await _connect_mcp(mcp_manager)
+            return await _chat_loop(runtime, session, scheduler, args)
+
+        asyncio.run(_with_mcp())
     finally:
         # Children are stopped before the log is closed: a subagent still writing
         # to a closed handle would fail in a way nobody could attribute.
