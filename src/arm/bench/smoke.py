@@ -358,6 +358,60 @@ def _checks_offline(report: Report) -> None:
 
     _check(report, "the defect count is verifiable and consistent", defect_register_is_consistent)
 
+    def a_session_resumes_from_its_log() -> str:
+        """A second process sees what the first one recorded.
+
+        M1's entire claim is that the log is the truth. Every test of it so far
+        built a session, used it, and rehydrated it -- all in one process, where a
+        value held in memory could be mistaken for a value held in the log.
+
+        Found worth checking by asking what had never been tried: a real resume,
+        across a process boundary. Run by hand it worked -- the goal persisted
+        with its id, the turn counter continued, and a file written in run 1 was
+        readable in run 2 -- but nothing would have caught it breaking.
+        """
+        import json as jsonlib
+
+        from arm.session.persistence import JsonlLog, read_log
+        from arm.session.session import Session as _Session
+
+        directory = Path(tempfile.mkdtemp(prefix="arm-smoke-resume-"))
+        path = directory / "resume.jsonl"
+
+        # Run 1: a session that records a goal, then is written to disk and
+        # discarded. Nothing from this object survives to run 2.
+        first = _Session.create("resume")
+        first.append(
+            "goal/changed",
+            {"action": "create", "goal": {"id": "goal-smoke", "objective": "resumed"}},
+        )
+        JsonlLog(path).append(list(first.events()), already_contiguous=True)
+        del first
+
+        # Run 2: a fresh process-equivalent, reading only the file.
+        restored = read_log(path)
+        session = _Session.from_events("resume", restored.events)
+
+        goals = [
+            event for event in session.events() if event.type == "goal/changed"
+        ]
+        if not goals:
+            raise AssertionError("the goal did not survive the round trip")
+
+        payload = jsonlib.loads(jsonlib.dumps(dict(goals[0].data)))
+        goal_id = (payload.get("goal") or {}).get("id")
+        if goal_id != "goal-smoke":
+            raise AssertionError(f"the goal came back as {goal_id!r}")
+
+        # And the log is appendable: a resumed session continues rather than
+        # restarting, which is what a second run does.
+        session.append("user/message", {"message": {"role": "user", "content": []}, "surface_op": "append"})
+        if session.events()[-1].seq != len(restored.events):
+            raise AssertionError("the resumed session did not continue the sequence")
+        return "goal and sequence survived a process boundary"
+
+    _check(report, "a session resumes from its log", a_session_resumes_from_its_log)
+
     def every_tool_is_reachable() -> str:
         """Every registered tool resolves through the pipeline's registry.
 
