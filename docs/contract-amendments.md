@@ -1440,3 +1440,57 @@ browser_fill  browser_click  browser_text
 ### 未发现缺陷
 
 第六个功能，第三次「通过」。**这一轮值得记的是操作纪律而不是缺陷**：`--user-data-dir` 隔离让「真跑一个有外部副作用的子系统」变成了一件安全的事 —— **下一次也可以用同样的办法跑 `computer`（但那个连屏幕，我仍会先问）。**
+
+---
+
+## 49. Computer use：**观察被「驱动」这个开关锁住了**（缺陷 85）
+
+第七个（也是最后一个）真跑的功能。**只跑了只读部分** —— 我没碰用户的桌面输入，因为上一轮我问了「要不要连点击一起跑」而没收到回答，**没回答就是不做的默认**。
+
+### 缺陷 85：注释说的和代码做的相反
+
+`Desktop.__init__` 写着：
+
+> 「**Observation is always allowed**; driving the desktop is opt-in, so a runtime that merely wants screenshots **does not thereby acquire the ability to type into a password prompt**.」
+
+工具层的设计注释也一致：`screen_capture` **不要求审批**，理由是「**looking at a screen changes nothing**」；只有 `screen_click`/`screen_type`/`screen_key` 标了 `requires_approval`。
+
+**实测：七个方法全部调用 `_require_enabled`。** 开关关着时，`capture`、`windows`、`cursor`、`frontmost` **全部**抛 `COMPUTER_DISABLED`。
+
+> **于是唯一能看到屏幕的办法，就是同时授予「往屏幕上打字」的权限 —— 正是那句注释声称它避免了的后果。**
+
+### 修法：把两种能力分开
+
+| 能力 | 开关 | 含义 |
+|---|---|---|
+| 观察 | `observe=True` | 看屏幕 |
+| 驱动 | `enabled=True` | 操作，**且蕴含观察**（否则每个驱动器都会莫名其妙失去眼睛） |
+
+CLI 加了 `ARM_COMPUTER=observe`（只观察）/ `ARM_COMPUTER=1`（观察+驱动）。
+
+**真跑验证**：`ARM_COMPUTER=observe` 下，`screen_windows` 列出 12 个窗口，而 `screen_click` **被拒绝**。模型自己也指出了这个安全含义：「gate covers driving, not observing」。
+
+### 另一条教训：**我花了几个探针追一个不存在的逻辑错误**
+
+修完之后测试**仍然失败**。我逐个检查构造函数、gate、方法调用，都对。真正原因是**陈旧的字节码**：早先的探针 import 过被修改的模块，`__pycache__` 把它留住了。**我在推理的是代码已经不行的行为。**
+
+> **清理 `__pycache__` 现在是我下结论前的一步。** 这个失败从内部看**和一个真缺陷一模一样** —— 它会让你去修一段本来就对的代码。
+
+清理后：1231 通过（此前 1227 —— **差了 4 条，是被陈旧字节码掩盖的**）。
+
+### 七个功能真跑完毕
+
+| 功能 | 结果 |
+|---|---|
+| subagent | 缺陷 79、80（子会话不落盘 + 血缘丢失） |
+| team | ✅（随 subagent 一起修） |
+| goal | ✅ |
+| todo | ✅ |
+| skill | ✅（我一度误报） |
+| plan | 缺陷 81、82（进不去 + 出不来） |
+| hooks | 缺陷 83、84（日志说不出谁拦的 + 身份只由加载器赋） |
+| schedule | ✅ |
+| worktree | ✅（两处「像缺陷」核对后不是） |
+| browser | ✅ |
+| plugins | 缺陷（插件形状**没有任何文档**，我失败三次才写对） |
+| **computer** | **缺陷 85（观察被驱动锁住）** |
