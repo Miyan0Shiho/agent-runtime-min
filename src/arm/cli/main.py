@@ -533,9 +533,22 @@ def build_runtime(
     # Computer use is off unless explicitly enabled: the desktop is not a
     # sandbox, so a runtime that could drive the machine without being asked
     # would be reaching into the user's mail, their bank and their terminal.
-    # ARM_COMPUTER=1 turns it on; the action tools still require approval.
-    if os.environ.get("ARM_COMPUTER", "") not in ("", "0", "false", "no"):
-        desktop = Desktop(enabled=True)
+    #
+    # Two switches, because the two capabilities have different consequences:
+    #
+    #   ARM_COMPUTER=observe  look at the screen, do not touch it
+    #   ARM_COMPUTER=1        observe and drive (the action tools still require
+    #                         approval on top of this)
+    #
+    # The split is not cosmetic. Before it, granting screenshots also granted
+    # typing -- so a runtime that only wanted to see what was on screen had to
+    # allow itself to type into a password prompt. The tool layer already made
+    # the distinction (`screen_capture` carries no approval requirement, the
+    # acting tools do); the capability flag lumped them back together.
+    computer_mode = os.environ.get("ARM_COMPUTER", "").strip().lower()
+    if computer_mode not in ("", "0", "false", "no"):
+        observe_only = computer_mode in ("observe", "read", "readonly", "read-only")
+        desktop = Desktop(enabled=not observe_only, observe=True)
         available, why = Desktop.available()
         if available:
             registry.register_many(ComputerTools(desktop).tools())

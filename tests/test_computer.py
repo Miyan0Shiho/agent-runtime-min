@@ -308,3 +308,79 @@ def test_action_tools_are_not_concurrency_safe():
 def test_an_unavailable_platform_raises_a_specific_error():
     """A clear error beats a mysterious empty result."""
     assert issubclass(ComputerUseUnavailableError, ComputerUseError)
+
+
+# ===========================================================================
+# Observation and driving are separate capabilities
+# ===========================================================================
+
+
+def test_observation_is_not_gated_on_driving():
+    """The documented split, which the code did not implement.
+
+    `Desktop.__init__` said "Observation is always allowed; driving the desktop is
+    opt-in, so a runtime that merely wants screenshots does not thereby acquire
+    the ability to type into a password prompt", and the tool layer says the same:
+    `screen_capture` carries no approval requirement "because looking at a screen
+    changes nothing".
+
+    Measured before the fix, with the flag off: `capture`, `windows`, `cursor` and
+    `frontmost` **all** raised COMPUTER_DISABLED. So the only way to look at the
+    screen was to also allow typing into it -- the exact outcome the comment said
+    it prevented.
+    """
+    from arm.computer.desktop import Desktop
+
+    observing = Desktop(observe=True, enabled=False)
+
+    assert observing.observe is True
+    assert observing.enabled is False
+    # Observation works.
+    assert len(observing.windows()) > 0
+    assert isinstance(observing.cursor(), tuple)
+
+
+def test_driving_requires_more_than_observation():
+    """The complement, and the reason the two are separate.
+
+    Being allowed to look must not imply being allowed to click. A screenshot
+    contains whatever is on screen; a click activates whatever is under it.
+    """
+    from arm.computer.desktop import ComputerUseError, Desktop
+
+    observing = Desktop(observe=True, enabled=False)
+
+    for action in (
+        lambda: observing.click(10, 10),
+        lambda: observing.type_text("x"),
+        lambda: observing.key("a"),
+    ):
+        with pytest.raises(ComputerUseError) as info:
+            action()
+        assert info.value.code == "COMPUTER_DISABLED"
+
+
+def test_driving_implies_observation():
+    """A runtime allowed to click is obviously allowed to look.
+
+    Requiring both flags would be a trap: every driver would silently lose its
+    eyes.
+    """
+    from arm.computer.desktop import Desktop
+
+    driving = Desktop(enabled=True)
+
+    assert driving.enabled is True
+    assert driving.observe is True
+
+
+def test_nothing_is_allowed_by_default():
+    """Both capabilities off, which is the state a caller gets unasked."""
+    from arm.computer.desktop import ComputerUseError, Desktop
+
+    default = Desktop()
+
+    assert default.observe is False
+    assert default.enabled is False
+    with pytest.raises(ComputerUseError):
+        default.windows()

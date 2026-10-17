@@ -132,11 +132,30 @@ class Desktop:
     it needs, which is slower and always correct.
     """
 
-    def __init__(self, *, timeout: float = DEFAULT_TIMEOUT, enabled: bool = False) -> None:
-        #: Whether actions are permitted. Observation is always allowed; driving
-        #: the desktop is opt-in, so a runtime that merely wants screenshots does
-        #: not thereby acquire the ability to type into a password prompt.
+    def __init__(
+        self,
+        *,
+        timeout: float = DEFAULT_TIMEOUT,
+        enabled: bool = False,
+        observe: bool = False,
+    ) -> None:
+        #: Whether the desktop may be **driven**. Opt-in, because driving is
+        #: irreversible: a click activates whatever was under it and typing goes
+        #: wherever focus is.
         self.enabled = enabled
+        #: Whether the screen may be **observed**. Separate from ``enabled``
+        #: because the two have different consequences and the tool split already
+        #: says so: `screen_capture`/`screen_windows`/`screen_cursor` carry no
+        #: approval requirement "because looking at a screen changes nothing",
+        #: while the acting tools do.
+        #:
+        #: They were not separate in practice. Every method called
+        #: `_require_enabled`, so observation was refused unless driving was also
+        #: permitted -- and the comment below claimed the opposite. Measured: with
+        #: the flag off, `capture`, `windows`, `cursor` and `frontmost` all raised
+        #: COMPUTER_DISABLED, so a runtime that only wanted screenshots had to
+        #: grant itself the ability to type into a password prompt.
+        self.observe = observe or enabled
         self.timeout = timeout
 
     # -- capability ------------------------------------------------------
@@ -162,6 +181,16 @@ class Desktop:
         if not ok:
             raise ComputerUseUnavailableError(reason)
 
+    def _require_observable(self) -> None:
+        """Observation gate: weaker than driving, and independent of it."""
+        if not self.observe:
+            raise ComputerUseError(
+                "computer observation is disabled; set ARM_COMPUTER=1 to allow "
+                "the agent to look at the desktop. It is off by default because a "
+                "screenshot can contain anything that is on screen.",
+                code="COMPUTER_DISABLED",
+            )
+
     def _require_enabled(self) -> None:
         if not self.enabled:
             raise ComputerUseError(
@@ -180,7 +209,7 @@ class Desktop:
         dialog that is actually blocking progress, and a screenshot that omits the
         thing the user is asking about is worse than none.
         """
-        self._require_enabled()
+        self._require_observable()
         self.require_available()
 
         import tempfile
@@ -209,7 +238,7 @@ class Desktop:
         empty case is reported explicitly -- otherwise "no windows" and "no
         permission" would look identical, and the second is the one worth fixing.
         """
-        self._require_enabled()
+        self._require_observable()
         self.require_available()
 
         script = """
@@ -267,7 +296,7 @@ class Desktop:
         model's decision and the action, and typing into the wrong window is not
         recoverable.
         """
-        self._require_enabled()
+        self._require_observable()
         self.require_available()
 
         script = (
@@ -287,7 +316,7 @@ class Desktop:
         like it should returns a ``missing value`` -- which a naive implementation
         would turn into ``(-1, -1)`` and report as a real coordinate.
         """
-        self._require_enabled()
+        self._require_observable()
         self.require_available()
 
         try:
