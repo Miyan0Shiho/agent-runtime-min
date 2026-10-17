@@ -255,15 +255,110 @@ def _checks_offline(report: Report) -> None:
         A shutdown that can only run once is a shutdown that leaks on the paths
         that do not reach the single call site.
         """
+        # One persistent loop for both calls, and it is closed only after the
+        # subprocess transports have finished: `shutdown` waits on child
+        # processes, and closing the loop underneath a pending `Process.wait()`
+        # leaves it orphaned. That produced a traceback at exit -- the same
+        # "attached to a different loop" class the MCP defect was -- even though
+        # the check had already passed.
         loop = asyncio.new_event_loop()
         try:
             loop.run_until_complete(runtime.shutdown())
             loop.run_until_complete(runtime.shutdown())
+            # Let any transport cleanup that was scheduled drain before closing.
+            loop.run_until_complete(asyncio.sleep(0))
         finally:
+            loop.run_until_complete(asyncio.sleep(0))
             loop.close()
         return "shutdown is idempotent"
 
     _check(report, "shutdown is repeatable", close)
+
+    def every_tool_is_reachable() -> str:
+        """Every registered tool resolves through the pipeline's registry.
+
+        This is the closest thing to "the whole runtime is assembled": tools come
+        from eight subsystems -- files, goals, todos, schedules, skills, subagents,
+        teams, worktrees, plan mode -- and a subsystem that constructed its tools
+        but never handed them to the registry produces exactly the symptom the
+        dead-code class has: the feature exists and cannot be reached.
+        """
+        registry = runtime.dispatcher.pipeline.registry
+        names = sorted(registry.view().known)
+
+        missing = [name for name in names if registry.get(name) is None]
+        if missing:
+            raise AssertionError(f"listed but unresolvable: {missing}")
+
+        # Every one of the promises below must be reachable by name. A name that
+        # is absent means the subsystem was built and not connected.
+        expected = {
+            # files and shell
+            "read", "write", "edit", "bash", "glob", "grep",
+            # plan mode, in both directions
+            "enter_plan_mode", "exit_plan_mode",
+            # goals
+            "create_goal", "get_goal", "update_goal",
+            # todos
+            "todo_write",
+            # schedules
+            "schedule_create", "schedule_list", "schedule_history",
+            "schedule_cancel",
+            # skills and delegation
+            "skill", "subagent",
+            # teams
+            "team_spawn", "team_send", "team_status",
+            # worktrees
+            "worktree_create", "worktree_list", "worktree_remove",
+        }
+        absent = expected - set(names)
+        if absent:
+            raise AssertionError(f"unreachable through the registry: {sorted(absent)}")
+        return f"{len(names)} tools from {len(expected)} names checked"
+
+    _check(report, "every tool is reachable through the runtime", every_tool_is_reachable)
+
+    def the_subsystems_answers_are_real() -> str:
+        """Call one tool from each read-side subsystem and read its answer.
+
+        Reachability only proves the registry has an object. This proves the
+        object works with the runtime it was attached to -- which is where the
+        loop-mismatch and channel-missing defects lived.
+        """
+        registry = runtime.dispatcher.pipeline.registry
+        calls = [
+            ("todo_write", {"todos": [{"content": "smoke", "status": "pending"}]}),
+            ("create_goal", {"objective": "smoke goal"}),
+            ("get_goal", {}),
+            ("schedule_list", {}),
+            ("worktree_list", {}),
+        ]
+
+        async def run_them() -> dict[str, str]:
+            results: dict[str, str] = {}
+            for name, arguments in calls:
+                tool = registry.get(name)
+                if tool is None:
+                    raise AssertionError(f"{name} is not registered")
+                result = await tool.body(arguments, None)
+                results[name] = result.content
+                if result.is_error:
+                    raise AssertionError(f"{name} failed: {result.content[:120]}")
+            return results
+
+        loop = asyncio.new_event_loop()
+        try:
+            results = loop.run_until_complete(run_them())
+        finally:
+            loop.close()
+
+        # And the answers are answers, not empty successes.
+        for name in ("create_goal", "get_goal"):
+            if "goal-" not in results[name]:
+                raise AssertionError(f"{name} returned no goal id: {results[name][:80]}")
+        return f"{len(calls)} subsystem calls answered"
+
+    _check(report, "each subsystem answers through the runtime", the_subsystems_answers_are_real)
 
 
 def _new_session():
@@ -351,16 +446,24 @@ def _checks_live(report: Report, *, key: str, base: str, model: str) -> None:
         )
 
         async def scenario():
-            await client.connect()
-            tool = registry.get("mcp__smoke__add")
-            if tool is None:
-                raise AssertionError("the MCP tool was not registered")
-            return await tool.body({"a": 2, "b": 3}, None)
+            # Connect, call, and close on **one** loop. Closing with a separate
+            # `asyncio.run` was the same loop-mismatch defect this check exists to
+            # catch: the transport's subprocess belongs to the loop that opened
+            # it, and closing it from another produced
+            # "closing smoke failed: ... attached to a different loop" at exit.
+            #
+            # A smoke check reproducing the bug it checks for is worth stating
+            # plainly: it passed its assertions and still printed a traceback.
+            try:
+                await client.connect()
+                tool = registry.get("mcp__smoke__add")
+                if tool is None:
+                    raise AssertionError("the MCP tool was not registered")
+                return await tool.body({"a": 2, "b": 3}, None)
+            finally:
+                await client.close()
 
-        try:
-            result = asyncio.run(scenario())
-        finally:
-            asyncio.run(client.close())
+        result = asyncio.run(scenario())
         if result.is_error:
             raise AssertionError(f"the call failed: {result.content[:120]}")
         return f"server returned {result.content}"

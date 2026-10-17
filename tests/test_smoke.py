@@ -44,6 +44,8 @@ def test_the_report_names_every_subsystem_it_verified():
         "spill store enforces its ceiling",
         "approval is attached",
         "shutdown is repeatable",
+        "every tool is reachable through the runtime",
+        "each subsystem answers through the runtime",
     }
     missing = required - names
     assert not missing, f"the smoke check stopped verifying: {sorted(missing)}"
@@ -95,3 +97,67 @@ def test_the_offline_checks_do_not_need_network_access():
     assert skipped_names == ["live provider and MCP round trips"], skipped_names
     # The config parse -- which needs no network -- still ran.
     assert any("MCP config" in check.name for check in report.passed)
+
+
+def test_every_tool_the_runtime_registers_is_reachable():
+    """The registry must resolve each name it lists.
+
+    A subsystem that constructs its tools and never hands them to the registry is
+    the dead-code symptom in reverse: the feature exists on the object graph and
+    cannot be reached by name.
+    """
+    from arm.cli.main import build_runtime
+    import tempfile
+    from pathlib import Path
+
+    home = Path(tempfile.mkdtemp())
+    runtime, _session, _handle, _scheduler, _mcp = build_runtime(
+        session_id="smoke-tools",
+        model="m",
+        api_key="k",
+        base_url="http://127.0.0.1:1",
+        home=str(home),
+        persist=False,
+    )
+    registry = runtime.dispatcher.pipeline.registry
+    listed = registry.view().known
+
+    assert listed, "the runtime registered no tools at all"
+    unresolvable = [name for name in listed if registry.get(name) is None]
+    assert not unresolvable, f"listed but not resolvable: {unresolvable}"
+
+
+def test_the_subsystem_names_the_project_promises_are_all_present():
+    """Each subsystem's tools, by name.
+
+    Enumerated rather than counted: a count would pass while the wrong subsystem
+    were registered, and the failure message names what is missing.
+    """
+    from arm.cli.main import build_runtime
+    import tempfile
+    from pathlib import Path
+
+    home = Path(tempfile.mkdtemp())
+    runtime, _session, _handle, _scheduler, _mcp = build_runtime(
+        session_id="smoke-names",
+        model="m",
+        api_key="k",
+        base_url="http://127.0.0.1:1",
+        home=str(home),
+        persist=False,
+    )
+    names = set(runtime.dispatcher.pipeline.registry.view().known)
+
+    for subsystem, expected in {
+        "files": {"read", "write", "edit", "bash", "glob", "grep"},
+        "plan": {"enter_plan_mode", "exit_plan_mode"},
+        "goals": {"create_goal", "get_goal", "update_goal"},
+        "todos": {"todo_write"},
+        "schedules": {"schedule_create", "schedule_list", "schedule_cancel"},
+        "skills": {"skill"},
+        "delegation": {"subagent"},
+        "teams": {"team_spawn", "team_send", "team_status"},
+        "worktrees": {"worktree_create", "worktree_list", "worktree_remove"},
+    }.items():
+        missing = expected - names
+        assert not missing, f"{subsystem} is unreachable: {sorted(missing)}"
