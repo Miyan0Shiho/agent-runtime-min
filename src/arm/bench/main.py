@@ -158,7 +158,22 @@ def measure_replay_fidelity(*, rounds: int = 5) -> Metric:
                 JsonlLog(path).append(session.events())
                 restored = Session.from_events(f"bench-{round_index}", read_log(path).events)
 
-            replayed = [m.to_record() for m in restored.derive()]
+            # Compare **wire against wire**, rendering the replay through the same
+            # adapter. `_render_wire_messages` normalises a received request into
+            # the wire shape; comparing that against `to_record()` -- the internal
+            # shape -- was only ever equal because no role mapping existed.
+            #
+            # When `developer` -> `system` was added, the end-to-end test was fixed
+            # and this caller was not: it kept comparing a wire form against an
+            # internal one, so every request mismatched and M1 read as 0%. The
+            # metric that exists to prove the log reconstructs the request was the
+            # thing that stopped working.
+            replayed = [
+                OpenAICompatibleAdapter(
+                    api_key="k", base_url="http://x", model="bench"
+                )._render_message(m)
+                for m in restored.derive()
+            ]
             for sent in server.received:
                 total += 1
                 wire = _render_wire_messages(sent["messages"])
