@@ -7,7 +7,7 @@
 > **代码:28,270 行实现 / 23,102 行测试 / 1,240 个测试通过(另 12 条需真模型 key,无 key 自动 skip) / 81 个模块** · `make bench` / `make claims` / `make deadcode` / `make smoke` 全绿
 > 决策链:[ADR-0001](docs/decisions/0001-scope-and-non-goals.md)(范围/clean-room)→ [ADR-0002](docs/decisions/0002-design-alignment-and-native-builtins.md)(设计对齐)→ [ADR-0003](docs/decisions/0003-usable-harness-and-t3-scope.md)(可自用 + 全做 + 顺序护栏)
 > 设计产物:主链路 1 份 + 机制契约 4 份(**78 条不变量**)+ 决策记录 3 份 + 参考 2 份
-> 实施产物:**内核主干 M1–M4 全部实现** + [契约修正记录](docs/contract-amendments.md)(83 条真实缺陷) + [方法论教训](docs/lessons.md) + [前置验证](spikes/)
+> 实施产物:**内核主干 M1–M4 全部实现** + [契约修正记录](docs/contract-amendments.md)(84 条真实缺陷) + [方法论教训](docs/lessons.md) + [前置验证](spikes/)
 
 ## 现在能跑什么
 
