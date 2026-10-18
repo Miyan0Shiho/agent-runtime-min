@@ -67,7 +67,22 @@ smoke:
 typecheck:
 	pyright
 
-check: test typecheck smoke
+# Everything that has to be true before a commit.
+#
+# `bench` is in here because leaving it out cost a real regression: the
+# `developer` -> `system` role mapping broke `measure_replay_fidelity` while every
+# test and every smoke check stayed green, and M1 -- the project's first
+# invariant -- read 0% for several rounds before anyone ran the metric again.
+#
+# A metric that proves something has to be re-run, not just the suite around it.
+# `bench` already depends on `test`, so the suite runs once.
+#
+# `claims` is deliberately not included. It re-measures the design documents'
+# assumptions -- throughput, event sufficiency, configuration shape -- which change
+# when the design does, not when a commit does. Running it here would add a minute
+# to every check for something that almost never moves; `make claims` is the right
+# frequency for it.
+check: test typecheck smoke deadcode bench
 
 clean:
 	rm -rf .pytest_cache .pyright .coverage htmlcov
