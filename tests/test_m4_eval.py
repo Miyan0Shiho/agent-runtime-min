@@ -848,3 +848,111 @@ def test_the_reproducibility_metric_states_that_it_excludes_the_judge():
     assert "judge" in metric.detail, (
         "the detail line does not say that judge stability is measured elsewhere"
     )
+
+
+# ===========================================================================
+# The judge is actually called, and unreliable is actually populated
+# ===========================================================================
+
+
+class _FakeJudge:
+    """A judge that answers predictably, for testing the wiring."""
+
+    def __init__(self, *, reliable: bool = True, score: float | None = 4.0):
+        self.reliable = reliable
+        self.score = score
+        self.calls: list[str] = []
+
+    async def assess(self, task: str, answer: str):
+        from arm.eval.judge import Judgement
+
+        self.calls.append(task)
+        return Judgement(
+            reliable=self.reliable,
+            score=self.score if self.reliable else None,
+            note="fake",
+        )
+
+
+def _run_with_judge(judge, *, case_id: str = "canary/must-pass"):
+    """Run one case with a judge attached."""
+    from arm.eval.cases import default_cases
+    from arm.eval.harness import EvalSuite, Runner
+    from arm.session.session import Session
+
+    def run_case(case, workspace):
+        session = Session.create(case.id)
+        session.append(
+            "assistant/message",
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "done"}],
+                },
+                "surface_op": "append",
+            },
+        )
+        (workspace / "hello.txt").write_text("hello")
+        return session, ""
+
+    case = next(c for c in default_cases() if c.id == case_id)
+    suite = EvalSuite(cases=[case])
+    return Runner(run_case=run_case, judge=judge, check_canaries_first=False).run(suite)
+
+
+def test_the_judge_is_actually_called():
+    """Defect 90: the judge was complete, tested, and never invoked.
+
+    `SuiteResult.unreliable` existed from the first version to record judge
+    disagreements and had **no producer**. It was always empty, which reads as
+    "no disagreements found" rather than "no disagreement could be detected".
+    """
+    judge = _FakeJudge()
+    result = _run_with_judge(judge)
+
+    assert judge.calls, "the judge was never called"
+    assert result.outcomes[0].score == 4.0
+    assert result.outcomes[0].judge_reliable is True
+
+
+def test_an_unreliable_judgement_is_recorded_in_the_suite():
+    """The field's purpose, now that something produces it."""
+    judge = _FakeJudge(reliable=False)
+    result = _run_with_judge(judge)
+
+    assert result.unreliable == ("canary/must-pass",), result.unreliable
+    # An unreliable judgement yields no score: reporting a number the judge
+    # itself disowned would be worse than reporting none.
+    assert result.outcomes[0].score is None
+
+
+def test_no_judge_means_no_score_and_no_unreliable_cases():
+    """Absence is not a failure.
+
+    A suite run without a judge must not be reported as having unreliable
+    verdicts -- there were no verdicts to be unreliable about.
+    """
+    result = _run_with_judge(None)
+
+    assert result.unreliable == ()
+    assert result.outcomes[0].score is None
+    assert result.outcomes[0].judge_reliable is None
+
+
+def test_a_judge_failure_does_not_fail_the_case():
+    """The checks decide pass or fail. A judge is advisory.
+
+    A judge that raises must not turn a passing case into a failing one: the
+    case's own checks are what say the work happened, and the judge was answering
+    a different question.
+    """
+
+    class BrokenJudge:
+        async def assess(self, task, answer):
+            raise RuntimeError("judge exploded")
+
+    result = _run_with_judge(BrokenJudge())
+
+    assert result.outcomes[0].passed, "a judge fault failed a passing case"
+    assert "judge exploded" in result.outcomes[0].judge_note
+    assert result.unreliable == (), "a judge fault was recorded as an unreliable verdict"

@@ -31,6 +31,7 @@ Three principles follow, and each one rules something out:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import shutil
@@ -42,6 +43,7 @@ from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from ..kernel.errors import ArmError, describe
 from ..session.session import Session
+from .judge import Judge
 
 
 class EvalError(ArmError):
@@ -304,6 +306,19 @@ class CaseOutcome:
     events: int = 0
     turn_reason: str = ""
     error: str = ""
+    #: The judge's score, when a judge was configured and produced one.
+    #:
+    #: Separate from `passed`, which is the deterministic verdict. Keeping them
+    #: apart is the whole reason the harness prefers code over a model: a case can
+    #: pass its checks and still be judged poor, and the two facts are different.
+    score: float | None = None
+    #: Whether the judge's two orderings agreed. False means the score is not to
+    #: be trusted, and the case is counted as unreliable rather than scored.
+    #:
+    #: Nothing populated this before: `SuiteResult.unreliable` exists to record
+    #: judge disagreements and had no producer at all. Defect 90.
+    judge_reliable: bool | None = None
+    judge_note: str = ""
 
     @property
     def failed_checks(self) -> tuple[CheckResult, ...]:
@@ -417,6 +432,17 @@ class Runner:
     #: Whether to run canaries first. Not optional in spirit: a broken harness
     #: makes every other number meaningless.
     check_canaries_first: bool = True
+    #: An optional judge, for the questions a check cannot answer.
+    #:
+    #: Optional rather than required, and that is the design rather than a
+    #: convenience: a judge needs a model, and the harness must work without one.
+    #: When it is absent the outcomes carry no score and the suite reports no
+    #: unreliable cases -- an absence, not a zero.
+    #:
+    #: Typed with the real class rather than `Any`: an untyped seam was part of
+    #: how the judge stayed unwired -- nothing referred to it by name, so the
+    #: reachability check could not see that it existed.
+    judge: "Judge | None" = None
 
     def run(
         self, suite: EvalSuite, *, workdir: Path | str | None = None
@@ -452,8 +478,24 @@ class Runner:
         # Restore the suite's own order for reporting.
         by_key = {o.case.key: o for o in outcomes}
         ordered_outcomes = tuple(by_key[c.key] for c in suite.cases)
+        # Cases whose judge disagreed with itself between the two orderings.
+        #
+        # This field existed from the first version and **nothing ever populated
+        # it**: the judge was complete, tested, and never called by the harness, so
+        # `unreliable` was always empty and looked like "no disagreements were
+        # found" rather than "no disagreement could be detected". Defect 90.
+        #
+        # A case with no judge run is not unreliable -- absence is not a failure.
+        unreliable = tuple(
+            outcome.case.id
+            for outcome in ordered_outcomes
+            if outcome.judge_reliable is False
+        )
+
         return SuiteResult(
-            outcomes=ordered_outcomes, canary_failures=tuple(canary_failures)
+            outcomes=ordered_outcomes,
+            canary_failures=tuple(canary_failures),
+            unreliable=unreliable,
         )
 
     def run_one(self, case: EvalCase, base: Path) -> CaseOutcome:
@@ -485,6 +527,26 @@ class Runner:
 
         steps = sum(1 for e in session if e.type == "step/start")
         turn_reasons = [e.data.get("reason") for e in session if e.type == "turn/end"]
+
+        # The judge, when one is configured. It answers a different question from
+        # the checks: the checks ask "did the work happen", the judge asks "was
+        # the answer any good". Both are recorded, and neither overrides the
+        # other -- a passing case can be judged poor, and that is information.
+        score: float | None = None
+        reliable: bool | None = None
+        note = ""
+        if self.judge is not None:
+            answer = _final_assistant_text(session)
+            if answer:
+                try:
+                    judgement = asyncio.run(self.judge.assess(case.task, answer))
+                except Exception as exc:  # noqa: BLE001 - a judge fault is not a case fault
+                    note = f"the judge failed: {describe(exc)}"
+                else:
+                    reliable = judgement.reliable
+                    score = judgement.score
+                    note = judgement.note
+
         return CaseOutcome(
             case=case,
             passed=all(r.passed for r in results),
@@ -493,6 +555,9 @@ class Runner:
             tokens=_total_tokens(session),
             events=len(session),
             turn_reason=str(turn_reasons[-1]) if turn_reasons else "",
+            score=score,
+            judge_reliable=reliable,
+            judge_note=note,
         )
 
 

@@ -325,16 +325,6 @@ TEST_ONLY_ACCEPTED: dict[str, str] = {
     "src/arm/bench/claims.py": "reached by `make claims`, an external entry point",
     # `make deadcode` itself: invoked from the Makefile, same reason.
     "src/arm/bench/deadcode.py": "reached by `make deadcode`, an external entry point",
-    # Defect 89. Accepted rather than removed: the module is correct and tested,
-    # and the fix is to give it a caller (a jobs tool in the CLI), which is a
-    # design decision rather than a cleanup. Listed so the ratchet does not fail
-    # on every run while the decision is open -- and so removing the entry is
-    # what happens when it is wired.
-    "src/arm/jobs/registry.py": "defect 89: no caller in the product; needs a CLI surface",
-    # Defect 90. Same shape: a complete, tested judge with no integration. The
-    # eval harness has an `unreliable` field for its verdicts that nothing
-    # populates.
-    "src/arm/eval/judge.py": "defect 90: no integration; CaseOutcome has no score field",
 }
 
 

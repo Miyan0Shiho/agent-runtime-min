@@ -442,6 +442,62 @@ def _checks_offline(report: Report) -> None:
 
     _check(report, "context management is attached", context_management_is_attached)
 
+    def background_jobs_work() -> str:
+        """A job starts, runs, and its output can be read back.
+
+        `arm/jobs/` was 925 lines with thorough tests and no caller: defect 89.
+        Reachability is not enough here -- the check runs one, because the whole
+        point of a job is that it produces output the caller reads later.
+        """
+        registry_tools = runtime.dispatcher.pipeline.registry
+        start = registry_tools.get("job_start")
+        read = registry_tools.get("job_read")
+        if start is None or read is None:
+            raise AssertionError("the job tools are not registered")
+
+        async def scenario():
+            started = await start.body(
+                {"command": "echo smoke-job", "label": "smoke"}, None
+            )
+            if started.is_error:
+                raise AssertionError(f"job_start failed: {started.content[:100]}")
+            job_id = started.value["job_id"]
+            # The job is a subprocess; give it a moment before reading.
+            for _ in range(40):
+                result = await read.body({"job_id": job_id}, None)
+                if result.is_error:
+                    raise AssertionError(f"job_read failed: {result.content[:100]}")
+                if "smoke-job" in result.content:
+                    return job_id
+                await asyncio.sleep(0.05)
+            raise AssertionError(f"the job produced no expected output: {result.content[:120]}")
+
+        job_id = asyncio.run(scenario())
+        return f"{job_id} ran and its output was read"
+
+    _check(report, "a background job runs and reports", background_jobs_work)
+
+    def the_judge_is_wired() -> str:
+        """The eval harness can call a judge, and records when one disagrees.
+
+        `eval/judge.py` was complete and never invoked: defect 90. `SuiteResult`
+        had an `unreliable` field with no producer, which reads as "no
+        disagreements" rather than "no way to detect one".
+        """
+        import inspect
+
+        from arm.eval.harness import CaseOutcome, Runner, SuiteResult
+
+        if "judge" not in inspect.signature(Runner).parameters:
+            raise AssertionError("the Runner has no judge seam, so the judge is unreachable")
+        if "score" not in {f.name for f in __import__("dataclasses").fields(CaseOutcome)}:
+            raise AssertionError("CaseOutcome has no score field, so a verdict goes nowhere")
+        if "unreliable" not in {f.name for f in __import__("dataclasses").fields(SuiteResult)}:
+            raise AssertionError("SuiteResult has no unreliable field")
+        return "judge seam, score field, and unreliable field all present"
+
+    _check(report, "the eval judge is wired", the_judge_is_wired)
+
     def every_tool_is_reachable() -> str:
         """Every registered tool resolves through the pipeline's registry.
 

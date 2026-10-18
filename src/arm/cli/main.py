@@ -29,6 +29,8 @@ from ..context.manager import ContextManager
 from ..context.meter import Thresholds
 from ..context.spill import SpillStore
 from ..context.summarize import build_summarizer
+from ..jobs.registry import JobRegistry
+from ..jobs.tools import JobTools
 from ..goal.store import GoalStore
 from ..goal.tools import GoalTools
 from ..plan.mode import PlanMode, plan_tools
@@ -323,6 +325,18 @@ def build_runtime(
     # running on its own until someone asks it to.
     goal_store = GoalStore(session)
     registry.register_many(GoalTools(goal_store).tools())
+
+    # Background jobs. `arm/jobs/` was 925 lines with thorough tests and no caller
+    # anywhere in the product: it satisfied "任务编排: jobs" on paper while being
+    # unreachable. Defect 89.
+    #
+    # The owner is the session id, so a job belongs to the session that started it
+    # and no other session can read it -- authorization by owner, not by knowing
+    # an id. Jobs die with the process: the CLI runs one process per invocation,
+    # so a job is for work spanning *steps within one session*, not across runs.
+    # Stated rather than hidden, because a job that silently vanished between
+    # processes would be worse than one never offered.
+    registry.register_many(JobTools(JobRegistry(), owner=session_id).tools())
 
     # The todo list is the model's own scratchpad. It is recorded but never
     # injected into the prompt: re-feeding it would restate what the model just
