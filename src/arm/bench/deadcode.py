@@ -320,3 +320,69 @@ def run(src: Path, baseline_path: Path = BASELINE_PATH) -> tuple[list[Finding], 
     findings = find_uncalled(src, baseline=KNOWN_ENTRY_POINTS)
     fresh = new_findings(findings, baseline)
     return findings, not fresh
+
+
+def find_test_only_modules(src: Path) -> list[tuple[str, tuple[str, ...]]]:
+    """Modules whose public names are referenced only by the test suite.
+
+    **Why this is a separate check from `find_uncalled`.** That one asks whether a
+    name is mentioned *anywhere*, deliberately, because resolving attribute access
+    in a dynamic language produced 229 false positives when it tried to be
+    sharper. But "mentioned anywhere" includes the module's own tests -- so a
+    module that exists, is well documented, has thorough tests, and **no caller
+    anywhere in the product** is invisible to it.
+
+    Measured: `jobs/` is 925 lines, in the REQUIREMENTS scope ("任务编排: jobs"), has
+    its own test file, and is imported by nothing outside itself. It was invisible
+    for exactly that reason.
+
+    This check asks a question that *is* decidable without resolving anything:
+    for each public name a module defines, does it appear anywhere in `src/` that
+    is not the module itself? If no name does, the module cannot be reached from
+    the product. Tests are checked separately to distinguish "unreachable and
+    untested" (dead) from "unreachable but tested" (a feature nothing calls).
+
+    Returns ``(module, public_names)`` pairs for modules that only their tests
+    mention.
+    """
+    import re
+
+    root = src.parent
+    src_files = [p for p in src.rglob("*.py")]
+    texts = {p: p.read_text(encoding="utf-8", errors="replace") for p in src_files}
+    tests_root = root / "tests"
+    test_text = (
+        "\n".join(
+            p.read_text(encoding="utf-8", errors="replace")
+            for p in tests_root.rglob("*.py")
+        )
+        if tests_root.exists()
+        else ""
+    )
+
+    findings: list[tuple[str, tuple[str, ...]]] = []
+    for module, text in texts.items():
+        if module.stem == "__init__":
+            continue
+        public = {
+            name
+            for name in re.findall(r"^(?:def|class) ([A-Za-z_][A-Za-z0-9_]*)", text, re.M)
+            if not name.startswith("_")
+        }
+        if not public:
+            continue
+
+        outside = "\n".join(
+            other for path, other in texts.items() if path != module
+        )
+        if any(re.search(rf"\b{re.escape(name)}\b", outside) for name in public):
+            continue
+        # Only interesting when the tests do reach it: an unreferenced and
+        # untested module is already reported by `find_uncalled`.
+        if not any(re.search(rf"\b{re.escape(name)}\b", test_text) for name in public):
+            continue
+
+        findings.append(
+            (str(module.relative_to(root)), tuple(sorted(public)))
+        )
+    return sorted(findings)
