@@ -33,7 +33,7 @@ import ast
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterator, Mapping, Sequence
+from typing import Any, Iterator, Mapping, Sequence
 
 #: Where the baseline is stored, so a run can be compared against a commit.
 BASELINE_PATH = Path(__file__).with_name("deadcode-baseline.json")
@@ -314,11 +314,64 @@ def render(findings: Sequence[Finding], baseline: Mapping[str, str]) -> str:
     return "\n".join(lines)
 
 
-def run(src: Path, baseline_path: Path = BASELINE_PATH) -> tuple[list[Finding], bool]:
-    """Check the tree, returning the findings and whether anything is new."""
+#: Modules reachable only from their own tests, and why each is accepted.
+#:
+#: Mirrored in the findings baseline so `make deadcode` can ratchet on both kinds
+#: of finding. A module that is added and never wired appears here as a new entry
+#: and fails the check, which is the point.
+TEST_ONLY_ACCEPTED: dict[str, str] = {
+    # A measurement tool invoked by `make claims`, not by the runtime. Its entry
+    # point is the Makefile, which the name-based ratchet cannot see.
+    "src/arm/bench/claims.py": "reached by `make claims`, an external entry point",
+    # `make deadcode` itself: invoked from the Makefile, same reason.
+    "src/arm/bench/deadcode.py": "reached by `make deadcode`, an external entry point",
+    # Defect 89. Accepted rather than removed: the module is correct and tested,
+    # and the fix is to give it a caller (a jobs tool in the CLI), which is a
+    # design decision rather than a cleanup. Listed so the ratchet does not fail
+    # on every run while the decision is open -- and so removing the entry is
+    # what happens when it is wired.
+    "src/arm/jobs/registry.py": "defect 89: no caller in the product; needs a CLI surface",
+    # Defect 90. Same shape: a complete, tested judge with no integration. The
+    # eval harness has an `unreliable` field for its verdicts that nothing
+    # populates.
+    "src/arm/eval/judge.py": "defect 90: no integration; CaseOutcome has no score field",
+}
+
+
+def run(src: Path, baseline_path: Path = BASELINE_PATH) -> tuple[list[Any], bool]:
+    """Check the tree, returning the findings and whether anything is new.
+
+    Two kinds of finding, because they need different rules:
+
+    * names mentioned nowhere at all (`find_uncalled`, name-based and conservative);
+    * modules whose public names are reached only by their own tests
+      (`find_test_only_modules`). This second check exists because the first is
+      blind to exactly that case, and `jobs/` -- 925 lines, in scope, with tests,
+      reachable from nothing -- hid behind it.
+    """
     baseline = load_baseline(baseline_path)
-    findings = find_uncalled(src, baseline=KNOWN_ENTRY_POINTS)
+    findings: list[Any] = list(find_uncalled(src, baseline=KNOWN_ENTRY_POINTS))
     fresh = new_findings(findings, baseline)
+
+    for module, names in find_test_only_modules(src):
+        if module in TEST_ONLY_ACCEPTED:
+            continue
+        findings.append(
+            Finding(
+                definition=Definition(
+                    name=module,
+                    qualname=module,
+                    kind="module",
+                    file=module,
+                    line=0,
+                ),
+                reason=(
+                    "reachable only from its own tests: nothing outside this module "
+                    f"in src/ references {', '.join(names[:3])}"
+                ),
+            )
+        )
+
     return findings, not fresh
 
 
