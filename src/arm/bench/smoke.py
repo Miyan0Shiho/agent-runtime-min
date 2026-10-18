@@ -412,6 +412,36 @@ def _checks_offline(report: Report) -> None:
 
     _check(report, "a session resumes from its log", a_session_resumes_from_its_log)
 
+    def context_management_is_attached() -> str:
+        """The runtime can actually compact.
+
+        Without a `ContextManager` the loop never calls `relieve()`, so nothing is
+        spilled, pruned or compacted and the context grows unbounded. Measured in
+        a real 32-turn session before this was wired: 107 requests, zero
+        context-management records, zero compactions -- while M2 passed all four
+        of its acceptance metrics in `make bench`.
+
+        That is why this check exists rather than trusting the benchmark: a
+        subsystem can be measured in isolation and still not be connected.
+        """
+        manager = runtime.context
+        if manager is None:
+            raise AssertionError(
+                "no context manager: the loop will never relieve pressure"
+            )
+        if manager.thresholds.threshold_tokens <= 0:
+            raise AssertionError("the threshold is not positive, so it never fires")
+        if getattr(manager, "_summarize", None) is None:
+            raise AssertionError(
+                "no summarizer: compaction would be attempted and refused"
+            )
+        return (
+            f"threshold {manager.thresholds.threshold_tokens:,} tokens, "
+            "summarizer attached"
+        )
+
+    _check(report, "context management is attached", context_management_is_attached)
+
     def every_tool_is_reachable() -> str:
         """Every registered tool resolves through the pipeline's registry.
 

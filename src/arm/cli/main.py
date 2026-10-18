@@ -25,6 +25,10 @@ from typing import Any, Sequence
 from ..agent.loop import LoopHooks, Runtime
 from ..llm.openai_adapter import OpenAICompatibleAdapter
 from ..approval.service import POLICY_ASK, ApprovalService, ask_in_terminal
+from ..context.manager import ContextManager
+from ..context.meter import Thresholds
+from ..context.spill import SpillStore
+from ..context.summarize import build_summarizer
 from ..goal.store import GoalStore
 from ..goal.tools import GoalTools
 from ..plan.mode import PlanMode, plan_tools
@@ -694,6 +698,32 @@ def build_runtime(
     # The loop fires due reminders at the start of each turn; without this the
     # scheduler would be reachable only by tests -- reminders would be creatable
     # and never delivered.
+    # Context management. Without this the loop never calls `relieve()`, so
+    # nothing is spilled, pruned or compacted and the context grows without bound.
+    #
+    # Measured in a real 32-turn session before this was wired: 107 requests, zero
+    # context-management records, zero compactions. M2 was implemented, had four
+    # acceptance metrics, and passed all of them in `make bench` -- while being
+    # unreachable from the command line. That is the largest instance of the
+    # dead-code class this project has had, and the benchmark passing is what made
+    # it invisible.
+    #
+    # The window comes from the environment rather than a config file because it
+    # is a property of the model, and the model is chosen on the command line.
+    # A wrong value is worse than none: too large and compaction never triggers,
+    # too small and it triggers constantly. 200k matches the models this has been
+    # run against, and ARM_CONTEXT_WINDOW overrides it.
+    context_window = int(os.environ.get("ARM_CONTEXT_WINDOW", "200000") or 200000)
+    context_manager = ContextManager(
+        session,
+        thresholds=Thresholds(
+            context_window=context_window,
+            reserved_completion=int(os.environ.get("ARM_RESERVED_COMPLETION", "8192") or 8192),
+        ),
+        summarize=build_summarizer(adapter, model=model),
+        spill=SpillStore(Path(home or DEFAULT_HOME) / "spill"),
+    )
+
     runtime = Runtime(
         session,
         adapter,
@@ -707,6 +737,7 @@ def build_runtime(
         scheduler=scheduler,
         subagents=subagents,
         hook_bridge=hook_bridge,
+        context=context_manager,
         model=model,
     )
 
