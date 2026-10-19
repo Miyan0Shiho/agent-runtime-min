@@ -81,7 +81,7 @@ make check      # 全部五项,一条命令,约 3 分钟
 ## 4. 当前状态(可核对)
 
 ```
-1256 passed, 12 skipped        make test
+1257 passed, 12 skipped        make test
 19 smoke checks passed         make smoke
 35 uncalled, 0 not in baseline make deadcode
 M1 replay 100% · M2 79.068% / 0.0pp · M3 100% · M4 100%/100%   make bench
@@ -90,7 +90,7 @@ M1 replay 100% · M2 79.068% / 0.0pp · M3 100% · M4 100%/100%   make bench
 | 项 | 值 |
 |---|---|
 | 实现 | 28,827 行 / 83 模块 |
-| 测试 | 23,210 行 / 29 个文件 / 1,256 条 |
+| 测试 | 23,276 行 / 29 个文件 / 1,257 条 |
 | 提交 | 约 100(不精确 —— 写入它的那次提交本身会改变这个数,所以它不可校验) |
 | 真实缺陷 | **87 条**(编号到 91,4 个跳号) |
 | 仓库 | 39 M(含 .git 6.2 M) |

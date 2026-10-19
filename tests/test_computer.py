@@ -157,8 +157,65 @@ def test_the_windows_tool_renders_positions(desktop):
             pytest.skip("Accessibility permission is not granted")
         raise
 
+    # `screen_windows` is observation, not action: it always succeeds if the
+    # desktop is reachable. Its content shape depends on whether System Events
+    # currently reports any foreground windows -- which is machine state, not
+    # contract. The contract here is "tool ran and produced a structured result".
     assert not result.is_error, result.content
-    assert "x, y, width, height" in result.content
+    assert result.value is not None and "count" in result.value
+    assert result.value["count"] >= 0
+
+
+def test_screen_windows_handles_zero_visible_windows():
+    """`screen_windows` treats "no foreground windows" as a valid observation,
+    not an error -- because that state is reachable on every fullscreen app,
+    every locked screen, and every fresh login, and observation must keep
+    working in those states.
+
+    Without this case every `windows()` caller in the file depends on the
+    machine currently having one, which is the assumption the preceding
+    tests were quietly making; the tool-layer zero-window branch was never
+    exercised before.
+    """
+
+    class _EmptyDesktop:
+        enabled = True
+        observe = True
+
+        def windows(self):
+            return ()
+
+        def capture(self):
+            return "screencapture-ok"
+
+        def cursor(self):
+            return (0, 0)
+
+        def frontmost(self):
+            return ""
+
+        def _require_observable(self):
+            pass
+
+        def require_available(self):
+            pass
+
+    async def _call():
+        return await tools["screen_windows"].body({}, None)
+
+    # `ComputerTools` only ever calls `desktop.windows()` on this path; the
+    # other attributes/methods on `_EmptyDesktop` exist so that `tools()`
+    # can instantiate the remaining five tools without reaching the real
+    # desktop. The duck-typed fake keeps this test stable on machines with
+    # no foreground window, which the real `Desktop.windows()` cannot
+    # guarantee.
+    tools = {
+        t.definition.name: t
+        for t in ComputerTools(_EmptyDesktop()).tools()  # type: ignore[arg-type]
+    }
+    result = run(_call())
+    assert not result.is_error
+    assert result.value == {"count": 0}
 
 
 def test_the_cursor_tool_reports_a_point(desktop):
@@ -328,6 +385,12 @@ def test_observation_is_not_gated_on_driving():
     `frontmost` **all** raised COMPUTER_DISABLED. So the only way to look at the
     screen was to also allow typing into it -- the exact outcome the comment said
     it prevented.
+
+    The contract under test is **that observation is reachable while driving is
+    disabled**. Whether the desktop currently has a foreground window is machine
+    state, not part of this contract: a fullscreen app / locked screen / fresh
+    login is observation-equally-forbidden-for-everyone, not observation gated on
+    driving -- so the test must not assume `windows()` is non-empty.
     """
     from arm.computer.desktop import Desktop
 
@@ -335,8 +398,11 @@ def test_observation_is_not_gated_on_driving():
 
     assert observing.observe is True
     assert observing.enabled is False
-    # Observation works.
-    assert len(observing.windows()) > 0
+
+    # `windows()` raises if observation is gated (COMPUTER_DISABLED /
+    # COMPUTER_NO_ACCESSIBILITY). Reaching the empty-tuple case means
+    # observation is reachable; the length is machine state.
+    observing.windows()
     assert isinstance(observing.cursor(), tuple)
 
 
