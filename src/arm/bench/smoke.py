@@ -315,6 +315,46 @@ def _checks_offline(report: Report) -> None:
 
     _check(report, "the README states true counts", readme_counts_are_true)
 
+    def the_handover_states_true_counts() -> str:
+        """The handover summary's figures match the tree.
+
+        Same failure as the README had, and for the same reason: nothing checked.
+        A handover whose numbers are stale is worse than no handover, because the
+        reader has no way to tell which of its claims still hold -- and its claims
+        are about whether the project works at all.
+        """
+        root = Path(__file__).resolve().parents[3]
+        handover_path = root / "HANDOVER.md"
+        if not handover_path.exists():
+            return "no handover document"
+
+        handover = handover_path.read_text(encoding="utf-8")
+
+        modules = len(list((root / "src" / "arm").rglob("*.py")))
+        src_lines = sum(
+            len(path.read_text(encoding="utf-8", errors="replace").splitlines())
+            for path in (root / "src").rglob("*.py")
+        )
+        test_files = len(list((root / "tests").glob("test_*.py")))
+        tests = 0
+        for path in (root / "tests").rglob("*.py"):
+            text = path.read_text(encoding="utf-8", errors="replace")
+            tests += text.count("\ndef test_") + text.count("\ndef test_", 0)
+
+        problems: list[str] = []
+        for label, value in (
+            ("modules", f"{modules} 模块"),
+            ("src lines", f"{src_lines:,} 行"),
+            ("test files", f"{test_files} 个文件"),
+        ):
+            if value not in handover:
+                problems.append(f"{label}: {value!r} appears nowhere")
+        if problems:
+            raise AssertionError("; ".join(problems))
+        return f"{modules} modules, {src_lines:,} lines, {test_files} test files all stated"
+
+    _check(report, "the handover states true counts", the_handover_states_true_counts)
+
     def defect_register_is_consistent() -> str:
         """The defect count in the docs matches the register that enumerates it.
 
